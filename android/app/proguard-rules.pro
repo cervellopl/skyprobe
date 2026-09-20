@@ -1,0 +1,4 @@
+-keepattributes *Annotation*, InnerClasses
+-keep,includedescriptorclasses class net.skyprobe.app.net.**$$serializer { *; }
+-keepclassmembers class net.skyprobe.app.net.** { *** Companion; }
+-keepclasseswithmembers class net.skyprobe.app.net.** { kotlinx.serialization.KSerializer serializer(...); }

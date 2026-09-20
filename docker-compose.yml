@@ -1,0 +1,21 @@
+services:
+  skyprobe:
+    build: ./backend
+    image: skyprobe:latest
+    ports:
+      - "8765:8765"
+    volumes:
+      - skyprobe-data:/data
+      # extra astrometry.net index files, if you downloaded them yourself:
+      # - ./indexes:/usr/share/astrometry:ro
+    environment:
+      # ASTROMETRY_API_KEY: "your nova.astrometry.net key"   # fallback / remote-only solving
+      # API_TOKEN: "choose-a-secret"                          # require X-API-Key on every request
+      SOLVER: auto          # auto | local | remote
+      WORKERS: "1"          # parallel jobs (each one needs ~1 GB RAM for large RAW files)
+      MAX_UPLOAD_MB: "300"
+      KEEP_JOBS: "200"
+    restart: unless-stopped
+
+volumes:
+  skyprobe-data:

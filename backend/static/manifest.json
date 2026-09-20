@@ -1,0 +1,25 @@
+{
+  "name": "SkyProbe",
+  "short_name": "SkyProbe",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0b0f17",
+  "theme_color": "#0b0f17",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }],
+  "share_target": {
+    "action": "/share",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "files": [
+        {
+          "name": "file",
+          "accept": ["image/*", "application/octet-stream", "application/fits", "image/fits",
+                     "image/x-adobe-dng", ".fits", ".fit", ".fts", ".dng", ".cr2", ".cr3", ".nef",
+                     ".arw", ".orf", ".rw2", ".raf", ".heic", ".jpg", ".jpeg", ".png", ".tif", ".tiff"]
+        }
+      ]
+    }
+  }
+}

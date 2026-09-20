@@ -1,0 +1,277 @@
+"""SkyProbe - REST API + web UI.
+
+POST /api/jobs            upload an image (multipart), returns job id
+GET  /api/jobs            recent jobs
+GET  /api/jobs/{id}       status + full results (poll until status is done/failed)
+GET  /api/jobs/{id}/preview.jpg | annotated.jpg | wcs.fits | solution.wcs | aavso.txt | photometry.csv | candidates.csv
+DELETE /api/jobs/{id}
+GET  /api/health          capabilities of this server
+"""
+from __future__ import annotations
+
+import csv
+import io
+import json
+import os
+import re
+import secrets
+import shutil
+import threading
+import time
+import traceback
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
+
+from . import astrometry, pipeline
+from .imageio import DEVICE_PRESETS, FITS_EXT, JPEG_EXT, RAW_EXT
+
+VERSION = "1.0.0"
+ROOT = Path(__file__).resolve().parent.parent
+DATA = Path(os.environ.get("DATA_DIR", ROOT / "data"))
+JOBS_DIR = DATA / "jobs"
+JOBS_DIR.mkdir(parents=True, exist_ok=True)
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", 300))
+API_TOKEN = os.environ.get("API_TOKEN", "")  # optional shared secret for public deployments
+KEEP_JOBS = int(os.environ.get("KEEP_JOBS", 200))
+ALLOWED_EXT = RAW_EXT | FITS_EXT | JPEG_EXT
+
+executor = ThreadPoolExecutor(max_workers=int(os.environ.get("WORKERS", 1)))
+
+
+class Job:
+    lock = threading.Lock()
+
+    def __init__(self, job_id: str, filename: str = "", input_path: str = "", opts: dict | None = None):
+        self.id = job_id
+        self.dir = JOBS_DIR / job_id
+        self.filename = filename
+        self.input_path = input_path
+        self.result = {"id": job_id, "status": "queued", "stage": "queued", "progress": 0, "log": [],
+                       "created": time.time(), "filename": filename,
+                       "options": {k: v for k, v in (opts or {}).items() if k != "api_key"}}
+
+    def set_stage(self, stage, progress):
+        self.result.update({"stage": stage, "progress": progress, "status": "running"})
+        self.save()
+
+    def log(self, msg):
+        self.result["log"].append(f"{time.strftime('%H:%M:%S')} {msg}")
+        self.save()
+
+    def save(self):
+        with self.lock:
+            tmp = self.dir / "result.json.tmp"
+            tmp.write_text(json.dumps(self.result, default=_json_default))
+            tmp.replace(self.dir / "result.json")
+
+
+def _json_default(o):
+    import numpy as np
+
+    if isinstance(o, (np.floating,)):
+        return None if not np.isfinite(o) else float(o)
+    if isinstance(o, np.integer):
+        return int(o)
+    if isinstance(o, np.bool_):
+        return bool(o)
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    return str(o)
+
+
+def _run_job(job: Job, opts: dict):
+    try:
+        pipeline.run(job, opts, job.dir, job.log)
+        job.result.update({"status": "done", "stage": "done", "progress": 100})
+    except Exception as e:
+        job.result.update({"status": "failed", "stage": "failed", "error": str(e)})
+        job.log("ERROR " + "".join(traceback.format_exception_only(type(e), e)).strip())
+        traceback.print_exc()
+    finally:
+        job.result["finished"] = time.time()
+        job.save()
+        _prune()
+
+
+def _prune():
+    dirs = sorted((d for d in JOBS_DIR.iterdir() if d.is_dir()), key=lambda d: d.stat().st_mtime, reverse=True)
+    for d in dirs[KEEP_JOBS:]:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _load(job_id: str) -> dict:
+    if not re.fullmatch(r"[a-f0-9]{16}", job_id):
+        raise HTTPException(404, "unknown job")
+    p = JOBS_DIR / job_id / "result.json"
+    if not p.exists():
+        raise HTTPException(404, "unknown job")
+    for _ in range(3):
+        try:
+            return json.loads(p.read_text())
+        except json.JSONDecodeError:
+            time.sleep(0.05)
+    raise HTTPException(503, "busy")
+
+
+def auth(x_api_key: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    if not API_TOKEN:
+        return
+    token = x_api_key or (authorization or "").removeprefix("Bearer ").strip()
+    if not secrets.compare_digest(token or "", API_TOKEN):
+        raise HTTPException(401, "invalid or missing API token")
+
+
+app = FastAPI(title="SkyProbe", version=VERSION,
+              description="Plate solving (astrometry.net), transient search and variable-star photometry "
+                          "for phone and Seestar images.")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+@app.get("/api/health")
+def health():
+    return {"status": "ok", "version": VERSION, "local_solver": astrometry.local_available(),
+            "remote_solver_key_configured": bool(os.environ.get("ASTROMETRY_API_KEY")),
+            "auth_required": bool(API_TOKEN), "max_upload_mb": MAX_UPLOAD_MB,
+            "formats": sorted(e.lstrip(".") for e in ALLOWED_EXT),
+            "devices": {"auto": "Auto-detect", "phone": "Phone camera",
+                        **{k: v["label"] for k, v in DEVICE_PRESETS.items()}}}
+
+
+@app.post("/api/jobs", status_code=202, dependencies=[Depends(auth)])
+async def create_job(
+    file: UploadFile = File(...),
+    device: str = Form("auto"),
+    scale: str = Form(""), scale_low: str = Form(""), scale_high: str = Form(""),
+    ra: str = Form(""), dec: str = Form(""), radius: str = Form(""),
+    solver: str = Form("auto"), api_key: str = Form(""),
+    obs_time: str = Form(""), utc_offset: str = Form(""),
+    lat: str = Form(""), lon: str = Form(""),
+    photometry: str = Form("true"), transients: str = Form("true"),
+    band: str = Form(""), mag_limit: str = Form(""), obscode: str = Form(""),
+    use_header_wcs: str = Form("true"), detect_sigma: str = Form(""),
+):
+    opts = {k: v for k, v in dict(device=device, scale=scale, scale_low=scale_low, scale_high=scale_high, ra=ra,
+                                  dec=dec, radius=radius, solver=solver, api_key=api_key, obs_time=obs_time,
+                                  utc_offset=utc_offset, lat=lat, lon=lon, photometry=photometry,
+                                  transients=transients, band=band, mag_limit=mag_limit, obscode=obscode,
+                                  use_header_wcs=use_header_wcs, detect_sigma=detect_sigma).items()
+            if v not in ("", None)}
+    return await _submit(file, opts)
+
+
+async def _submit(file: UploadFile, opts: dict) -> dict:
+    name = Path(file.filename or "upload").name
+    ext = Path(name).suffix.lower()
+    if ext not in ALLOWED_EXT:
+        # some share sheets hand over a file without a usable name
+        guess = {"image/jpeg": ".jpg", "image/png": ".png", "image/heic": ".heic", "image/heif": ".heic",
+                 "image/tiff": ".tif", "image/webp": ".webp", "image/x-adobe-dng": ".dng",
+                 "application/fits": ".fits", "image/fits": ".fits"}.get((file.content_type or "").lower())
+        if guess:
+            ext = guess
+            name = name + guess if "." not in name else Path(name).stem + guess
+    if ext not in ALLOWED_EXT:
+        raise HTTPException(415, f"Unsupported file type '{ext}'. Supported: {', '.join(sorted(ALLOWED_EXT))}")
+    job_id = secrets.token_hex(8)
+    jdir = JOBS_DIR / job_id
+    jdir.mkdir(parents=True)
+    dest = jdir / ("input" + ext)
+    size = 0
+    with open(dest, "wb") as f:
+        while chunk := await file.read(1 << 20):
+            size += len(chunk)
+            if size > MAX_UPLOAD_MB * 1024 * 1024:
+                f.close()
+                shutil.rmtree(jdir, ignore_errors=True)
+                raise HTTPException(413, f"File larger than {MAX_UPLOAD_MB} MB")
+            f.write(chunk)
+    job = Job(job_id, name, str(dest), opts)
+    job.result["size_bytes"] = size
+    job.save()
+    executor.submit(_run_job, job, opts)
+    return {"id": job_id, "status": "queued", "url": f"/api/jobs/{job_id}"}
+
+
+@app.get("/api/jobs", dependencies=[Depends(auth)])
+def list_jobs(limit: int = 30):
+    out = []
+    dirs = sorted((d for d in JOBS_DIR.iterdir() if d.is_dir()), key=lambda d: d.stat().st_mtime, reverse=True)
+    for d in dirs[:limit]:
+        try:
+            r = json.loads((d / "result.json").read_text())
+        except Exception:
+            continue
+        s = r.get("solution") or {}
+        out.append({"id": r["id"], "filename": r.get("filename"), "status": r.get("status"),
+                    "stage": r.get("stage"), "created": r.get("created"), "ra": s.get("ra"), "dec": s.get("dec"),
+                    "object": (r.get("meta") or {}).get("object"),
+                    "n_variables": len(r.get("variables", [])),
+                    "n_unidentified": sum(1 for c in r.get("candidates", []) if c.get("status") == "unidentified")})
+    return out
+
+
+@app.get("/api/jobs/{job_id}", dependencies=[Depends(auth)])
+def get_job(job_id: str):
+    return JSONResponse(_load(job_id))
+
+
+@app.delete("/api/jobs/{job_id}", dependencies=[Depends(auth)])
+def delete_job(job_id: str):
+    r = _load(job_id)
+    if r.get("status") in ("queued", "running"):
+        raise HTTPException(409, "job still running")
+    shutil.rmtree(JOBS_DIR / job_id, ignore_errors=True)
+    return {"deleted": job_id}
+
+
+FILES = {"preview.jpg": "image/jpeg", "annotated.jpg": "image/jpeg", "wcs.fits": "application/fits",
+         "solution.wcs": "text/plain", "aavso.txt": "text/plain"}
+
+
+@app.get("/api/jobs/{job_id}/{name}", dependencies=[Depends(auth)])
+def job_file(job_id: str, name: str):
+    r = _load(job_id)
+    if name == "photometry.csv":
+        return _csv(r.get("variables", []), ["name", "type", "ra", "dec", "x", "y", "mag", "err", "upper_limit",
+                                             "snr", "max", "min", "period", "airmass", "flags"], f"{job_id}_phot.csv")
+    if name == "candidates.csv":
+        rows = [{**c, "known": (c.get("known") or {}).get("name", "")} for c in r.get("candidates", [])]
+        return _csv(rows, ["status", "kind", "label", "ra", "dec", "x", "y", "mag", "snr", "fwhm_px", "known"],
+                    f"{job_id}_candidates.csv")
+    if name not in FILES:
+        raise HTTPException(404, "unknown file")
+    p = JOBS_DIR / job_id / name
+    if not p.exists():
+        raise HTTPException(404, "not available (yet)")
+    return FileResponse(p, media_type=FILES[name], filename=f"{job_id}_{name}" if not name.endswith("jpg") else None)
+
+
+def _csv(rows, cols, filename):
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(cols)
+    for r in rows:
+        w.writerow(["; ".join(r.get(c)) if isinstance(r.get(c), list) else ("" if r.get(c) is None else r.get(c))
+                    for c in cols])
+    return Response(buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.post("/share", include_in_schema=False, dependencies=[Depends(auth)])
+async def share_target(file: UploadFile = File(...), device: str = Form("auto")):
+    """Web Share Target: the installed web app appears in Android's share sheet.
+
+    The browser POSTs the shared picture here; we queue it and send the user to the result.
+    """
+    r = await _submit(file, {"device": device or "auto", "photometry": "true", "transients": "true"})
+    return RedirectResponse(f"/#job={r['id']}", status_code=303)
+
+
+# ---- web UI ------------------------------------------------------------------------------------
+STATIC = ROOT / "static"
+app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")

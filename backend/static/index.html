@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SkyProbe</title>
+<meta name="description" content="Plate solving, transient search and variable-star photometry for phone and Seestar images">
+<meta name="theme-color" content="#0b0f17">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><img src="icon.svg" alt="" width="28" height="28"><span>SkyProbe</span></div>
+  <nav>
+    <button class="linklike" id="btnHistory">History</button>
+    <a class="linklike" href="/docs" target="_blank" rel="noopener">API</a>
+    <span id="serverStatus" class="pill">…</span>
+  </nav>
+</header>
+
+<main>
+  <section id="uploadCard" class="card">
+    <h1>Analyse a sky image</h1>
+    <p class="muted">Phone or Seestar frames — JPEG, HEIC, camera RAW (DNG, CR2, NEF, ARW…) or FITS. The image is plate-solved with astrometry.net, searched for novae/comets and every catalogued variable star in the field is measured.</p>
+    <form id="form">
+      <label id="drop" class="drop" tabindex="0">
+        <input type="file" id="file" name="file" hidden>
+        <div class="dropInner">
+          <svg width="36" height="36" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 3l4 4h-3v6h-2V7H8l4-4zm-7 14h14v2H5v-2z"/></svg>
+          <div><strong>Drop an image here</strong> or click to choose</div>
+          <div id="fileName" class="muted small"></div>
+        </div>
+      </label>
+
+      <div class="row">
+        <label>Device
+          <select name="device" id="device">
+            <option value="auto">Auto-detect</option>
+            <option value="phone">Phone camera</option>
+            <option value="seestar_s50">ZWO Seestar S50</option>
+            <option value="seestar_s30">ZWO Seestar S30</option>
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" name="photometry" checked> Variable-star photometry</label>
+        <label class="check"><input type="checkbox" name="transients" checked> Search for new objects</label>
+      </div>
+
+      <details>
+        <summary>Advanced options</summary>
+        <div class="grid">
+          <label>Pixel scale ("/px)<input name="scale" inputmode="decimal" placeholder="auto"></label>
+          <label>RA hint (deg)<input name="ra" inputmode="decimal" placeholder="auto"></label>
+          <label>Dec hint (deg)<input name="dec" inputmode="decimal" placeholder="auto"></label>
+          <label>Search radius (deg)<input name="radius" inputmode="decimal" placeholder="15"></label>
+          <label>Observation time (UTC)<input name="obs_time" type="datetime-local" step="1"></label>
+          <label>UTC offset of EXIF time (h)<input name="utc_offset" inputmode="decimal" placeholder="from EXIF"></label>
+          <label>Latitude<input name="lat" inputmode="decimal" placeholder="from GPS"></label>
+          <label>Longitude<input name="lon" inputmode="decimal" placeholder="from GPS"></label>
+          <label>Band
+            <select name="band"><option value="">auto (TG / CV)</option><option>TG</option><option>CV</option><option>V</option><option>TB</option><option>TR</option><option>B</option><option>R</option><option>I</option></select>
+          </label>
+          <label>Catalogue mag limit<input name="mag_limit" inputmode="decimal" placeholder="auto"></label>
+          <label>AAVSO observer code<input name="obscode" id="obscode" placeholder="XXX"></label>
+          <label>Solver
+            <select name="solver"><option value="auto">auto</option><option value="local">local solve-field</option><option value="remote">nova.astrometry.net</option></select>
+          </label>
+          <label class="span2">astrometry.net API key (only if the server has none)<input name="api_key" id="apikey" type="password" autocomplete="off"></label>
+          <button type="button" class="ghost" id="btnGeo">Use my location</button>
+        </div>
+      </details>
+      <div class="actions"><button type="submit" id="btnSubmit" class="primary" disabled>Analyse</button></div>
+    </form>
+  </section>
+
+  <section id="progressCard" class="card hidden">
+    <div class="progressHead"><strong id="stage">Uploading…</strong><span id="pct" class="muted"></span></div>
+    <div class="bar"><div id="barFill"></div></div>
+    <pre id="log" class="log"></pre>
+  </section>
+
+  <section id="results" class="hidden">
+    <div class="card warn hidden" id="warnings"></div>
+
+    <div class="layout">
+      <div class="card viewerCard">
+        <div class="viewerTools">
+          <label class="check"><input type="checkbox" data-layer="candidates" checked> New objects</label>
+          <label class="check"><input type="checkbox" data-layer="variables" checked> Variables</label>
+          <label class="check"><input type="checkbox" data-layer="minor" checked> Asteroids / comets</label>
+          <label class="check"><input type="checkbox" data-layer="labels"> Labels</label>
+          <span class="grow"></span>
+          <button class="ghost small" id="zoomFit" title="Fit">Fit</button>
+        </div>
+        <div id="viewer" class="viewer">
+          <div id="stageWrap"><img id="img" alt="Uploaded image"><svg id="overlay"></svg></div>
+          <div id="tip" class="tip hidden"></div>
+        </div>
+        <div class="muted small">Scroll/pinch to zoom, drag to pan, click a marker for details.</div>
+      </div>
+
+      <div class="side">
+        <div class="card" id="solutionCard"></div>
+        <div class="card" id="calibCard"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="tableHead"><h2>New-object search</h2><span class="grow"></span><a class="ghost small btn" id="dlCand">CSV</a></div>
+      <div id="candidates"></div>
+    </div>
+
+    <div class="card">
+      <div class="tableHead"><h2>Variable stars</h2>
+        <input id="varFilter" placeholder="Filter by name or type" class="filter">
+        <span class="grow"></span>
+        <a class="ghost small btn" id="dlPhot">CSV</a><a class="ghost small btn" id="dlAavso">AAVSO report</a></div>
+      <div id="variables"></div>
+    </div>
+
+    <div class="card">
+      <div class="tableHead"><h2>Known asteroids &amp; comets in field</h2></div>
+      <div id="minor"></div>
+    </div>
+
+    <div class="card">
+      <details><summary>Processing log &amp; metadata</summary><pre id="fullLog" class="log"></pre></details>
+    </div>
+  </section>
+
+  <section id="historyCard" class="card hidden">
+    <div class="tableHead"><h2>Recent analyses</h2><span class="grow"></span><button class="ghost small" id="closeHistory">Close</button></div>
+    <div id="history"></div>
+  </section>
+</main>
+<footer class="muted small">Astrometry by <a href="https://astrometry.net" target="_blank" rel="noopener">astrometry.net</a> ·
+  Gaia DR3, Tycho-2, AAVSO VSX &amp; HyperLEDA via <a href="https://vizier.cds.unistra.fr" target="_blank" rel="noopener">VizieR</a> ·
+  minor bodies by <a href="https://ssp.imcce.fr/webservices/skybot/" target="_blank" rel="noopener">IMCCE SkyBoT</a></footer>
+<script src="app.js"></script>
+</body>
+</html>

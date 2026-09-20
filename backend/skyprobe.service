@@ -1,0 +1,20 @@
+# /etc/systemd/system/skyprobe.service
+[Unit]
+Description=SkyProbe astrometry & photometry service
+After=network-online.target
+
+[Service]
+User=astro
+WorkingDirectory=/opt/skyprobe/backend
+Environment=DATA_DIR=/var/lib/skyprobe
+Environment=WORKERS=1
+Environment=SOLVER=auto
+# Environment=ASTROMETRY_API_KEY=...
+# Environment=API_TOKEN=...
+ExecStart=/opt/skyprobe/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8765
+Restart=on-failure
+RestartSec=5
+StateDirectory=skyprobe
+
+[Install]
+WantedBy=multi-user.target

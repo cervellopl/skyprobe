@@ -1,0 +1,15 @@
+# SkyProbe backend
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+numpy>=1.26
+scipy>=1.11
+astropy>=6.0
+astroquery>=0.4.7
+sep>=1.2
+photutils>=1.12
+pillow>=10.2
+pillow-heif>=0.15      # HEIC/HEIF from iPhones and some Android phones
+rawpy>=0.19            # camera RAW (DNG, CR2/CR3, NEF, ARW, ORF, RW2 …)
+ExifRead>=3.0          # EXIF inside RAW files
+requests>=2.31
