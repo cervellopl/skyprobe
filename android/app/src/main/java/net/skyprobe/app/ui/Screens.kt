@@ -6,6 +6,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -195,18 +196,63 @@ private fun DevicePicker(state: UiState, vm: AppViewModel) {
 
 // ---------------------------------------------------------------- results
 
+private enum class VarSort(val label: String) { BRIGHT("Brightest"), FAINT("Faintest"), NAME("Name"), TYPE("Type") }
+private enum class BodySort(val label: String) { BRIGHT("Brightest"), MOTION("Fastest"), NAME("Name") }
+private enum class CandSort(val label: String) { BRIGHT("Brightest"), SNR("Strongest") }
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ResultScreen(job: JobResult, vm: AppViewModel) {
     var tab by remember { mutableIntStateOf(0) }
-    var query by remember { mutableStateOf("") }
     var imageTall by remember { mutableStateOf(false) }
+    // kept across tab switches, so going back to a list finds it as it was left
+    var query by remember { mutableStateOf("") }
+    var varSort by remember { mutableStateOf(VarSort.BRIGHT) }
+    var measuredOnly by remember { mutableStateOf(false) }
+    var unflaggedOnly by remember { mutableStateOf(false) }
+    var bodySort by remember { mutableStateOf(BodySort.BRIGHT) }
+    var detectedOnly by remember { mutableStateOf(false) }
+    var candSort by remember { mutableStateOf(CandSort.BRIGHT) }
+    var newOnly by remember { mutableStateOf(false) }
     val uri = LocalUriHandler.current
+
+    val variables = remember(job, query, varSort, measuredOnly, unflaggedOnly) {
+        job.variables
+            .filter { query.isBlank() || it.name.contains(query, true) || it.type.contains(query, true) }
+            .filter { !measuredOnly || !it.upperLimit }
+            .filter { !unflaggedOnly || it.flags.isEmpty() }
+            .sortedWith(
+                when (varSort) {
+                    VarSort.BRIGHT -> compareBy<Variable> { it.upperLimit }.thenBy { it.mag }
+                    VarSort.FAINT -> compareBy<Variable> { it.upperLimit }.thenByDescending { it.mag }
+                    VarSort.NAME -> compareBy<Variable> { it.name.lowercase() }
+                    VarSort.TYPE -> compareBy<Variable>({ it.type }, { it.mag })
+                }
+            )
+    }
+    val bodies = remember(job, bodySort, detectedOnly) {
+        job.minorBodies
+            .filter { !detectedOnly || it.detected }
+            .sortedWith(
+                when (bodySort) {
+                    BodySort.BRIGHT -> compareBy<MinorBody> { it.vmag ?: 99.0 }
+                    BodySort.MOTION -> compareByDescending<MinorBody> { kotlin.math.hypot(it.rateRa, it.rateDec) }
+                    BodySort.NAME -> compareBy<MinorBody> { it.name }
+                }
+            )
+    }
+    val candidates = remember(job, candSort, newOnly) {
+        job.candidates
+            .filter { !newOnly || it.status == "unidentified" }
+            .sortedWith(
+                when (candSort) {
+                    CandSort.BRIGHT -> compareBy<Candidate> { it.mag }
+                    CandSort.SNR -> compareByDescending<Candidate> { it.snr }
+                }
+            )
+    }
     val tabs = listOf("New objects (${job.unidentified})", "Variables (${job.variables.size})",
         "Minor bodies (${job.minorBodies.size})", "Details")
-    val variables = job.variables.filter {
-        query.isBlank() || it.name.contains(query, true) || it.type.contains(query, true)
-    }
 
     // One scrolling list for the whole screen: the preview and the summary scroll away
     // instead of permanently occupying the space the data needs, and the tabs stay on top.
@@ -223,15 +269,82 @@ private fun ResultScreen(job: JobResult, vm: AppViewModel) {
             }
         }
         when (tab) {
-            0 -> candidateItems(job.candidates, uri)
+            0 -> {
+                if (job.candidates.isNotEmpty()) item(key = "candbar") {
+                    FilterBar(
+                        sort = candSort.label, options = CandSort.entries.map { it.label },
+                        onSort = { candSort = CandSort.entries[it] },
+                        chips = listOf(Chip("Unidentified only", newOnly) { newOnly = !newOnly }),
+                        shown = candidates.size, total = job.candidates.size,
+                    )
+                }
+                candidateItems(candidates, uri)
+            }
             1 -> {
                 item(key = "vartools") { VariableToolbar(job, vm, query) { query = it } }
+                item(key = "varbar") {
+                    FilterBar(
+                        sort = varSort.label, options = VarSort.entries.map { it.label },
+                        onSort = { varSort = VarSort.entries[it] },
+                        chips = listOf(
+                            Chip("Measured only", measuredOnly) { measuredOnly = !measuredOnly },
+                            Chip("No warnings", unflaggedOnly) { unflaggedOnly = !unflaggedOnly },
+                        ),
+                        shown = variables.size, total = job.variables.size,
+                    )
+                }
                 variableItems(variables, job.calibration?.band ?: "", uri)
             }
-            2 -> minorBodyItems(job.minorBodies, job.time != null)
+            2 -> {
+                if (job.minorBodies.isNotEmpty()) item(key = "bodybar") {
+                    FilterBar(
+                        sort = bodySort.label, options = BodySort.entries.map { it.label },
+                        onSort = { bodySort = BodySort.entries[it] },
+                        chips = listOf(Chip("Detected only", detectedOnly) { detectedOnly = !detectedOnly }),
+                        shown = bodies.size, total = job.minorBodies.size,
+                    )
+                }
+                minorBodyItems(bodies, job.time != null)
+            }
             else -> detailItems(job)
         }
         item(key = "tail") { Spacer(Modifier.height(24.dp)) }
+    }
+}
+
+private class Chip(val label: String, val on: Boolean, val toggle: () -> Unit)
+
+/** Sort menu, toggle chips and a "showing x of y" count, shared by the three lists. */
+@Composable
+private fun FilterBar(sort: String, options: List<String>, onSort: (Int) -> Unit,
+                      chips: List<Chip>, shown: Int, total: Int) {
+    var open by remember { mutableStateOf(false) }
+    Column(Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) {
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box {
+                OutlinedButton(onClick = { open = true }, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
+                    Icon(Icons.Default.Sort, null, Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(sort, style = MaterialTheme.typography.labelLarge)
+                }
+                DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                    options.forEachIndexed { i, label ->
+                        DropdownMenuItem(text = { Text(label) }, onClick = { onSort(i); open = false })
+                    }
+                }
+            }
+            chips.forEach { c ->
+                FilterChip(selected = c.on, onClick = c.toggle, label = { Text(c.label) })
+            }
+        }
+        if (shown != total) {
+            Text("showing $shown of $total", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 2.dp))
+        }
     }
 }
 
@@ -352,7 +465,7 @@ private fun VariableToolbar(job: JobResult, vm: AppViewModel, query: String, onQ
 
 private fun LazyListScope.variableItems(items: List<Variable>, band: String, uri: UriHandler) {
     if (items.isEmpty()) {
-        item { Empty("No catalogued variables measured.") }
+        item { Empty("Nothing matches the filter.") }
         return
     }
     items(items, key = { "v" + it.oid + it.ra }) { v -> VariableCard(v, band) { uri.openUri(v.vsxUrl) } }
