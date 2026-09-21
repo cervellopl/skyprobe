@@ -337,10 +337,22 @@ async function loadVsnet() {
   const p = new URLSearchParams({
     observer: $("#observer").value || "", site: $("#site").value || "",
     instrument: $("#instrument").value || "", include_limits: $("#vsnetLimits").checked ? "true" : "false",
+    force: $("#vsnetForce").checked ? "true" : "false",
   });
   const r = await fetch(`/api/jobs/${job.id}/vsnet?${p}`);
   const v = await r.json();
-  if (!r.ok) { $("#vsnetInfo").textContent = v.detail || "could not compose the report"; return; }
+  if (r.status === 409 && v.detail?.blocked) {       // non-linear image: nothing to send
+    const d = v.detail;
+    $("#vsnetInfo").textContent = `${d.n_observations} observations would be reported.`;
+    $("#vsnetBlocked").classList.remove("hidden");
+    $("#vsnetBlocked").textContent = `${d.reason} Tick "force" above to compose it anyway.`;
+    $("#vsnetBody").value = d.preview + "\n…";
+    $("#vsnetMail").removeAttribute("href");
+    $("#vsnetMail").classList.add("disabled");
+    return;
+  }
+  if (!r.ok) { $("#vsnetInfo").textContent = (v.detail && v.detail.reason) || v.detail || "could not compose the report"; return; }
+  $("#vsnetMail").classList.remove("disabled");
   const sel = v.selection || {};
   $("#vsnetInfo").textContent = `${v.n_observations} observations of ${sel.total} measured ` +
     `(dropped: ${sel.dropped_survey_id || 0} survey IDs, ${sel.dropped_flagged || 0} flagged, ` +
@@ -358,6 +370,8 @@ async function loadVsnet() {
 }
 $("#btnVsnet")?.addEventListener("click", async () => { $("#vsnetDlg").showModal(); await loadVsnet(); });
 $("#vsnetLimits")?.addEventListener("change", loadVsnet);
+$("#vsnetForce")?.addEventListener("change", () => { store.set("sp_vsnetforce", $("#vsnetForce").checked ? "1" : ""); loadVsnet(); });
+if (store.get("sp_vsnetforce")) { const f = $("#vsnetForce"); if (f) f.checked = true; }
 $("#vsnetCopy")?.addEventListener("click", async () => {
   try { await navigator.clipboard.writeText($("#vsnetBody").value); $("#vsnetCopy").textContent = "Copied"; }
   catch { $("#vsnetBody").select(); }

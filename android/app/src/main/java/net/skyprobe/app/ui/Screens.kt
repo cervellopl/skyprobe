@@ -47,6 +47,7 @@ import net.skyprobe.app.net.Candidate
 import net.skyprobe.app.net.JobResult
 import net.skyprobe.app.net.MinorBody
 import net.skyprobe.app.net.Variable
+import net.skyprobe.app.net.BlockedException
 import net.skyprobe.app.net.VsnetReport
 import kotlin.math.abs
 
@@ -351,14 +352,17 @@ private fun VsnetDialog(job: JobResult, vm: AppViewModel, onClose: () -> Unit) {
     var report by remember { mutableStateOf<VsnetReport?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var includeLimits by remember { mutableStateOf(false) }
-    var acknowledged by remember { mutableStateOf(false) }
     var loading by remember { mutableStateOf(true) }
+    var blocked by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(includeLimits) {
+    LaunchedEffect(includeLimits, vm.state.value.settings.forceVsnet) {
         loading = true
         runCatching { vm.vsnetReport(job.id, includeLimits) }
-            .onSuccess { report = it; error = null }
-            .onFailure { error = it.message }
+            .onSuccess { report = it; error = null; blocked = null }
+            .onFailure { e ->
+                report = null
+                if (e is BlockedException) blocked = e.message else error = e.message
+            }
         loading = false
     }
 
@@ -368,7 +372,7 @@ private fun VsnetDialog(job: JobResult, vm: AppViewModel, onClose: () -> Unit) {
         title = { Text("Report to vsnet-obs") },
         confirmButton = {
             TextButton(
-                enabled = rep != null && rep.nObservations > 0 && (!rep.blocked || acknowledged),
+                enabled = rep != null && rep.nObservations > 0,
                 onClick = {
                     rep ?: return@TextButton
                     val send = Intent(Intent.ACTION_SENDTO).apply {
@@ -396,6 +400,13 @@ private fun VsnetDialog(job: JobResult, vm: AppViewModel, onClose: () -> Unit) {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 when {
                     loading -> Text("Composing…")
+                    blocked != null -> {
+                        Text("⚠ Report blocked", color = Warn, fontWeight = FontWeight.SemiBold)
+                        Text(blocked!!, style = MaterialTheme.typography.bodySmall)
+                        Text("Enable \"force\" in settings (⚙) if you want to post it regardless.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                     error != null -> Text(error!!, color = Danger)
                     rep != null -> {
                         val s = rep.selection
@@ -411,11 +422,8 @@ private fun VsnetDialog(job: JobResult, vm: AppViewModel, onClose: () -> Unit) {
                             Text("include fainter-than limits", style = MaterialTheme.typography.bodySmall)
                         }
                         if (rep.blocked) {
-                            Text("⚠ ${rep.blockedReason}", color = Warn, style = MaterialTheme.typography.bodySmall)
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Checkbox(acknowledged, { acknowledged = it })
-                                Text("send anyway", style = MaterialTheme.typography.bodySmall)
-                            }
+                            Text("⚠ ${rep.blockedReason} Composed because \"force\" is on in settings.",
+                                color = Warn, style = MaterialTheme.typography.bodySmall)
                         }
                         Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(8.dp)) {
                             Text(rep.body, Modifier.padding(8.dp), fontFamily = FontFamily.Monospace,
@@ -728,6 +736,15 @@ private fun SettingsDialog(state: UiState, vm: AppViewModel, onClose: () -> Unit
                     placeholder = { Text("Warsaw, Poland") }, singleLine = true)
                 OutlinedTextField(s.instrument, { s = s.copy(instrument = it) }, label = { Text("Instrument") },
                     placeholder = { Text("Galaxy S25 Ultra, 23 mm, 25 s") }, singleLine = true)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(s.forceVsnet, { b -> s = s.copy(forceVsnet = b) })
+                    Column {
+                        Text("Force VSNET reports", style = MaterialTheme.typography.bodyMedium)
+                        Text("Compose postings even from images whose camera response is not linear",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(s.lat, { s = s.copy(lat = it) }, label = { Text("Latitude") }, singleLine = true, modifier = Modifier.weight(1f))
                     OutlinedTextField(s.lon, { s = s.copy(lon = it) }, label = { Text("Longitude") }, singleLine = true, modifier = Modifier.weight(1f))

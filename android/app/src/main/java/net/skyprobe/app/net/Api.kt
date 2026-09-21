@@ -149,6 +149,9 @@ data class VsnetReport(
     val selection: VsnetSelection = VsnetSelection(),
 )
 
+/** The server refused to compose a posting (e.g. a non-linear camera response). */
+class BlockedException(message: String) : IOException(message)
+
 @Serializable
 private data class CreateResponse(val id: String = "")
 
@@ -172,10 +175,15 @@ class SkyProbeApi(baseUrl: String, private val token: String? = null) {
     private suspend fun <T> get(url: String, parse: (String) -> T): T = withContext(Dispatchers.IO) {
         client.newCall(req(url).build()).execute().use { r ->
             val body = r.body?.string().orEmpty()
+            if (r.code == 409 && body.contains("\"blocked\"")) throw BlockedException(blockedReason(body))
             if (!r.isSuccessful) throw IOException(errorMessage(body, r.code))
             parse(body)
         }
     }
+
+    private fun blockedReason(body: String): String =
+        Regex("\"reason\"\\s*:\\s*\"([^\"]*)\"").find(body)?.groupValues?.get(1)
+            ?: "This image cannot be reported."
 
     private fun errorMessage(body: String, code: Int): String = try {
         Json.parseToJsonElement(body).let { el ->
@@ -193,10 +201,10 @@ class SkyProbeApi(baseUrl: String, private val token: String? = null) {
 
     /** Composes (never sends) a vsnet-obs posting for this job. */
     suspend fun vsnet(jobId: String, observer: String, site: String, instrument: String,
-                      includeLimits: Boolean = false, limit: Int = 50): VsnetReport {
+                      includeLimits: Boolean = false, limit: Int = 50, force: Boolean = false): VsnetReport {
         fun enc(v: String) = java.net.URLEncoder.encode(v, "UTF-8")
         val url = "$base/api/jobs/$jobId/vsnet?observer=${enc(observer)}&site=${enc(site)}" +
-            "&instrument=${enc(instrument)}&include_limits=$includeLimits&limit=$limit"
+            "&instrument=${enc(instrument)}&include_limits=$includeLimits&limit=$limit&force=$force"
         return get(url) { json.decodeFromString(it) }
     }
 

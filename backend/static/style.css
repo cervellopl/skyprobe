@@ -95,3 +95,4 @@ dialog { max-width: min(760px, 94vw); width: 100%; background: var(--panel); col
 dialog::backdrop { background: rgba(0,0,0,.55); }
 dialog textarea { width: 100%; background: var(--panel2); color: var(--text); border: 1px solid var(--line);
   border-radius: 8px; padding: 10px; font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace; resize: vertical; }
+.btn.disabled { opacity: .45; pointer-events: none; }

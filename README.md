@@ -184,8 +184,10 @@ It is deliberately **composed, not sent**: the list expects the message to come 
 address the observer subscribed with, so the web UI and the app hand it to the mail client.
 Two guards keep the list usable: only named variables with small errors are included
 (auto-generated survey identifiers, flagged and too-noisy measurements are dropped, and the
-line count is capped — a wide phone frame yields ~2000 measurements), and a posting is
-marked *blocked* when the camera response was found to be non-linear.
+line count is capped — a wide phone frame yields ~2000 measurements), and a posting from an
+image whose camera response was found to be non-linear is **refused** (HTTP 409, with the
+reason and a short preview but no ready-to-send text) unless `force=true` is passed - a
+setting in the app and a checkbox in the web UI.
 
 ## Configuration (environment)
 

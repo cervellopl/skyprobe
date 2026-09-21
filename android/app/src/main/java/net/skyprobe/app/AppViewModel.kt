@@ -33,6 +33,7 @@ data class Settings(
     val device: String = "auto",
     val lat: String = "",
     val lon: String = "",
+    val forceVsnet: Boolean = false,   // allow postings from images with a non-linear response
     val photometry: Boolean = true,
     val transients: Boolean = true,
 )
@@ -74,6 +75,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         device = prefs.getString("device", "auto") ?: "auto",
         lat = prefs.getString("lat", "") ?: "",
         lon = prefs.getString("lon", "") ?: "",
+        forceVsnet = prefs.getBoolean("forceVsnet", false),
         photometry = prefs.getBoolean("photometry", true),
         transients = prefs.getBoolean("transients", true),
     )
@@ -86,6 +88,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             putString("observer", s.observer); putString("site", s.site); putString("instrument", s.instrument)
             putString("lat", s.lat); putString("lon", s.lon)
             putBoolean("photometry", s.photometry); putBoolean("transients", s.transients)
+            putBoolean("forceVsnet", s.forceVsnet)
         }.apply()
         val serverChanged = s.server != _state.value.settings.server || s.token != _state.value.settings.token
         _state.update { it.copy(settings = s) }
@@ -209,6 +212,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun aavsoReport(id: String): String = api.text(api.fileUrl(id, "aavso.txt"))
 
     suspend fun vsnetReport(id: String, includeLimits: Boolean) = with(_state.value.settings) {
-        api.vsnet(id, observer, site, instrument, includeLimits)
+        api.vsnet(id, observer, site, instrument, includeLimits, force = forceVsnet)
     }
 }

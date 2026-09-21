@@ -247,9 +247,12 @@ def job_report(job_id: str, refresh: bool = False):
 def job_vsnet(job_id: str, observer: str = "", site: str = "", instrument: str = "",
               limit: int = 50, named_only: bool = True, include_limits: bool = False,
               max_error: float = 0.2, intro: str = "", footer: str = "", subject: str = "",
-              plain: bool = False):
+              plain: bool = False, force: bool = False):
     """Composes a vsnet-obs posting. It is never sent from here: the list expects the
-    message to come from the observer's own (subscribed) address."""
+    message to come from the observer's own (subscribed) address.
+
+    A posting built from an image with a non-linear camera response is refused with 409
+    unless force=true: those magnitudes are not good enough for a public list."""
     r = _load(job_id)
     if r.get("status") != "done":
         raise HTTPException(409, "the analysis is not finished")
@@ -260,6 +263,13 @@ def job_vsnet(job_id: str, observer: str = "", site: str = "", instrument: str =
                                  footer=footer or None, subject=subject or None, version=VERSION)
     except ValueError as e:
         raise HTTPException(422, str(e))
+    if rep["blocked"] and not force:
+        # withhold the ready-to-send text, but show enough to explain the refusal
+        preview = "\n".join(rep["body"].splitlines()[:12])
+        raise HTTPException(409, {"blocked": True, "reason": rep["blocked_reason"],
+                                  "n_observations": rep["n_observations"],
+                                  "selection": rep["selection"], "preview": preview,
+                                  "hint": "repeat the request with force=true to compose it anyway"})
     if plain:
         return PlainTextResponse(rep["body"])
     return rep
