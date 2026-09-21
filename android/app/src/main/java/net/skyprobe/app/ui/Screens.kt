@@ -32,6 +32,7 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import kotlinx.coroutines.launch
 import net.skyprobe.app.AppViewModel
+import net.skyprobe.app.NOT_CONFIGURED
 import net.skyprobe.app.UiState
 import net.skyprobe.app.net.Candidate
 import net.skyprobe.app.net.JobResult
@@ -141,20 +142,24 @@ private fun HomeScreen(state: UiState, vm: AppViewModel) {
 @Composable
 private fun ServerStatus(state: UiState, vm: AppViewModel) {
     val h = state.health
+    val unset = state.healthError == NOT_CONFIGURED
     val text = when {
         h != null -> "Server ${h.version} · solver: " +
             listOfNotNull("local".takeIf { h.localSolver }, "nova".takeIf { h.remoteKey })
                 .ifEmpty { listOf("none – add an astrometry.net key") }.joinToString(" + ")
+        unset -> "No server yet — open settings (⚙) and enter the address of your SkyProbe server"
         state.healthError != null -> "Server unreachable: ${state.healthError}"
         else -> "Connecting…"
     }
     Surface(
-        color = if (h != null) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.errorContainer,
+        // "not configured yet" is a nudge, not a failure
+        color = if (h != null || unset) MaterialTheme.colorScheme.surfaceVariant
+                else MaterialTheme.colorScheme.errorContainer,
         shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth(),
     ) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(text, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-            TextButton(onClick = { vm.refreshHealth() }) { Text("Retry") }
+            if (!unset) TextButton(onClick = { vm.refreshHealth() }) { Text("Retry") }
         }
     }
 }
@@ -459,7 +464,9 @@ private fun SettingsDialog(state: UiState, vm: AppViewModel, onClose: () -> Unit
         title = { Text("Settings") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(s.server, { s = s.copy(server = it) }, label = { Text("Server URL") }, singleLine = true)
+                OutlinedTextField(s.server, { s = s.copy(server = it) }, label = { Text("Server URL") },
+                    placeholder = { Text("http://<host or IP>:5678") }, singleLine = true,
+                    supportingText = { Text("The machine running the SkyProbe backend, reachable from this phone") })
                 OutlinedTextField(s.token, { s = s.copy(token = it) }, label = { Text("Server API token (optional)") }, singleLine = true)
                 OutlinedTextField(s.apiKey, { s = s.copy(apiKey = it) }, label = { Text("astrometry.net key (optional)") }, singleLine = true)
                 OutlinedTextField(s.obscode, { s = s.copy(obscode = it) }, label = { Text("AAVSO observer code") }, singleLine = true)

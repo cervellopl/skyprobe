@@ -20,8 +20,10 @@ import net.skyprobe.app.net.JobResult
 import net.skyprobe.app.net.JobSummary
 import net.skyprobe.app.net.SkyProbeApi
 
+const val NOT_CONFIGURED = "not configured"
+
 data class Settings(
-    val server: String = "http://192.168.1.10:5678",
+    val server: String = "",          // set by the user: http://<host>:5678
     val token: String = "",
     val apiKey: String = "",
     val obscode: String = "",
@@ -87,6 +89,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun refreshHealth() = viewModelScope.launch {
+        if (_state.value.settings.server.isBlank()) {
+            _state.update { it.copy(health = null, healthError = NOT_CONFIGURED) }
+            return@launch
+        }
         _state.update { it.copy(health = null, healthError = null) }
         runCatching { api.health() }
             .onSuccess { h -> _state.update { it.copy(health = h, healthError = null) } }
@@ -136,6 +142,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun analyse(obsTime: String? = null) {
         val st = _state.value
         val uri = st.pickedUri ?: return
+        if (st.settings.server.isBlank()) {
+            _state.update { it.copy(error = "Set the server address in settings first") }
+            return
+        }
         _state.update { it.copy(busy = true, error = null, job = null, uploadProgress = 0f) }
         viewModelScope.launch {
             val s = st.settings
