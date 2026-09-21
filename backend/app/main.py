@@ -9,6 +9,7 @@ GET  /api/jobs/{id}/vsnet         composed vsnet-obs posting (JSON, or text with
 DELETE /api/jobs/{id}
 GET  /api/health          capabilities of this server
 GET  /api/db/stats | /api/db/stars | /api/db/star/{name} | /api/db/near | /api/db/images
+GET  /api/db/backup       download a consistent copy;  POST /api/db/restore  puts one back
 POST /api/db/backfill     fold the jobs on disk into the database
 """
 from __future__ import annotations
@@ -316,6 +317,43 @@ def db_near(ra: float, dec: float, radius_arcmin: float = 5.0, limit: int = 200)
 @app.get("/api/db/images", dependencies=[Depends(auth)])
 def db_images(limit: int = 50, offset: int = 0):
     return db.images(limit=min(limit, 500), offset=offset)
+
+
+@app.get("/api/db/backup", dependencies=[Depends(auth)])
+def db_backup(download: bool = True):
+    """A consistent copy of the archive, taken while the server keeps running."""
+    path = db.backup()
+    if not download:
+        return {"backup": path.name, "bytes": path.stat().st_size, "backups": db.list_backups()}
+    return FileResponse(path, media_type="application/vnd.sqlite3", filename=path.name)
+
+
+@app.get("/api/db/backups", dependencies=[Depends(auth)])
+def db_backups():
+    return db.list_backups()
+
+
+@app.post("/api/db/restore", dependencies=[Depends(auth)])
+async def db_restore(file: UploadFile = File(...), merge: bool = False, confirm: bool = False):
+    """Restore the archive from a backup, or merge one into it.
+
+    `confirm=true` is required for a replace, because it discards what is there now - a
+    safety copy of the current archive is always written first and named in the reply.
+    """
+    if not merge and not confirm:
+        raise HTTPException(400, "a replace discards the current archive: repeat with confirm=true "
+                                 "(or use merge=true to keep both sides)")
+    tmp = JOBS_DIR.parent / f"restore-{secrets.token_hex(4)}.sqlite"
+    try:
+        with open(tmp, "wb") as f:
+            while chunk := await file.read(1 << 20):
+                f.write(chunk)
+        try:
+            return db.restore(tmp, merge=merge)
+        except ValueError as e:      # not a SkyProbe archive
+            raise HTTPException(415, str(e))
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 @app.post("/api/db/backfill", dependencies=[Depends(auth)])

@@ -15,8 +15,10 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 DB_PATH = Path(os.environ.get("DB_PATH", Path(__file__).resolve().parent.parent / "data" / "skyprobe.sqlite"))
@@ -269,6 +271,129 @@ def images(limit: int = 50, offset: int = 0) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# ----------------------------------------------------------------------------
+# backup / restore
+# ----------------------------------------------------------------------------
+
+BACKUP_DIR = Path(os.environ.get("BACKUP_DIR", DB_PATH.parent / "backups"))
+BACKUP_KEEP = int(os.environ.get("BACKUP_KEEP", 10))
+
+
+def backup(dest: Path | None = None) -> Path:
+    """Consistent copy of the archive, taken through SQLite's online backup API.
+
+    Safe while the server keeps writing - unlike copying the file, which can catch
+    a half-written page or miss the write-ahead log.
+    """
+    if dest is None:
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        dest = BACKUP_DIR / f"skyprobe-{stamp}.sqlite"
+        n = 1
+        while dest.exists():      # two backups in the same second must not collide
+            dest = BACKUP_DIR / f"skyprobe-{stamp}-{n}.sqlite"
+            n += 1
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    source = connect()
+    with _lock:
+        target = sqlite3.connect(dest)
+        try:
+            source.backup(target)
+            target.execute("VACUUM")
+        finally:
+            target.close()
+    _prune_backups()
+    return dest
+
+
+def _prune_backups() -> None:
+    if not BACKUP_DIR.exists() or BACKUP_KEEP <= 0:
+        return
+    files = sorted(BACKUP_DIR.glob("skyprobe-*.sqlite"),
+                   key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
+    for old in files[BACKUP_KEEP:]:
+        old.unlink(missing_ok=True)
+
+
+def list_backups() -> list[dict]:
+    if not BACKUP_DIR.exists():
+        return []
+    return [{"name": p.name, "bytes": p.stat().st_size, "modified": p.stat().st_mtime}
+            for p in sorted(BACKUP_DIR.glob("skyprobe-*.sqlite"), key=lambda p: p.stat().st_mtime, reverse=True)]
+
+
+def inspect(path: Path) -> dict:
+    """What is inside a candidate backup file - checked before it is allowed near the archive."""
+    path = Path(path)
+    if path.stat().st_size < 100 or path.read_bytes()[:16] != b"SQLite format 3\x00":
+        raise ValueError("not a SQLite database")
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        con.row_factory = sqlite3.Row
+        tables = {r["name"] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        missing = {"images", "measurements"} - tables
+        if missing:
+            raise ValueError(f"not a SkyProbe archive (missing tables: {', '.join(sorted(missing))})")
+        return {
+            "images": con.execute("SELECT COUNT(*) FROM images").fetchone()[0],
+            "measurements": con.execute("SELECT COUNT(*) FROM measurements").fetchone()[0],
+            "candidates": con.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
+            if "candidates" in tables else 0,
+        }
+    finally:
+        con.close()
+
+
+def restore(src: Path, merge: bool = False) -> dict:
+    """Replace the archive with a backup, or merge a backup into it.
+
+    A safety copy of the current archive is always taken first, so a restore of the
+    wrong file is not the end of the story.
+    """
+    src = Path(src)
+    incoming = inspect(src)
+    before = stats()
+    safety = backup()
+
+    conn = connect()
+    if merge:
+        # SQLite refuses to ATTACH inside a transaction, so it happens around the writes
+        conn.execute("ATTACH DATABASE ? AS backup", (str(src),))
+        try:
+            with _lock, conn:
+                # keep both sides: images whose job_id is already here are left alone
+                conn.execute("INSERT OR IGNORE INTO images SELECT * FROM backup.images")
+                for table, columns in (
+                    ("measurements", "job_id, name, oid, type, ra, dec, jd, band, mag, err,"
+                                     " upper_limit, snr, airmass, flags"),
+                    ("candidates", "job_id, jd, status, kind, label, ra, dec, mag, snr, fwhm_px,"
+                                   " known_name, known_catalog"),
+                ):
+                    conn.execute(
+                        f"INSERT INTO {table} ({columns}) SELECT {columns} FROM backup.{table} b"
+                        f" WHERE b.job_id NOT IN (SELECT DISTINCT job_id FROM {table})")
+        finally:
+            conn.execute("DETACH DATABASE backup")
+    else:
+        # Swap the file rather than copying pages into the live database: in WAL mode the
+        # journal of the open connection would replay over the restored pages.
+        global _conn
+        with _lock:
+            conn.close()
+            _conn = None
+            shutil.copyfile(src, DB_PATH)
+            for journal in (DB_PATH.with_name(DB_PATH.name + "-wal"), DB_PATH.with_name(DB_PATH.name + "-shm")):
+                journal.unlink(missing_ok=True)
+        connect()
+
+    after = stats()
+    return {"mode": "merge" if merge else "replace", "incoming": incoming,
+            "before": {k: before[k] for k in ("images", "measurements")},
+            "after": {k: after[k] for k in ("images", "measurements")},
+            "safety_copy": str(safety)}
+
+
 def backfill(jobs_dir: Path) -> dict:
     """Fold every finished job on disk into the database (idempotent)."""
     stored = skipped = 0
@@ -286,8 +411,22 @@ def backfill(jobs_dir: Path) -> dict:
     return {"stored": stored, "skipped": skipped, **stats()}
 
 
-if __name__ == "__main__":  # python -m app.db [jobs_dir]
+if __name__ == "__main__":
     import sys
 
-    directory = Path(sys.argv[1]) if len(sys.argv) > 1 else DB_PATH.parent / "jobs"
-    print(json.dumps(backfill(directory), indent=1))
+    usage = ("usage: python -m app.db backfill [jobs_dir] | backup [file] | "
+             "restore <file> [--merge] | stats | backups")
+    command = sys.argv[1] if len(sys.argv) > 1 else "stats"
+    args = sys.argv[2:]
+    if command == "backfill":
+        print(json.dumps(backfill(Path(args[0]) if args else DB_PATH.parent / "jobs"), indent=1))
+    elif command == "backup":
+        print(json.dumps({"backup": str(backup(Path(args[0]) if args else None))}, indent=1))
+    elif command == "restore" and args:
+        print(json.dumps(restore(Path(args[0]), merge="--merge" in args), indent=1))
+    elif command == "backups":
+        print(json.dumps(list_backups(), indent=1))
+    elif command == "stats":
+        print(json.dumps(stats(), indent=1))
+    else:
+        print(usage)

@@ -335,3 +335,48 @@ def test_database_ingest_and_queries(tmp_path, monkeypatch):
 
     db.forget("c" * 16)
     assert db.stats()["images"] == 1
+
+
+def test_database_backup_and_restore(tmp_path, monkeypatch):
+    """A backup round-trips, a merge keeps both sides, and rubbish is refused."""
+    from app import db
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "live.sqlite")
+    monkeypatch.setattr(db, "BACKUP_DIR", tmp_path / "backups")
+    monkeypatch.setattr(db, "_conn", None)
+
+    def result(job_id, jd, name):
+        return {"id": job_id, "status": "done", "filename": f"{job_id}.fits", "created": 1.0,
+                "time": {"jd_mid": jd, "utc_mid": "2000-01-01T12:00:00"},
+                "solution": {"ra": 1.0, "dec": 2.0}, "calibration": {"band": "CV"},
+                "variables": [{"name": name, "mag": 12.0, "err": 0.01, "upper_limit": False, "flags": []}],
+                "candidates": []}
+
+    db.ingest(result("a" * 16, 2451545.0, "SS Cyg"))
+    first = db.backup()
+    assert db.inspect(first)["images"] == 1
+
+    # the archive moves on, then we go back to the backup
+    db.ingest(result("b" * 16, 2451546.0, "RR Lyr"))
+    assert db.stats()["images"] == 2
+    report = db.restore(first)
+    assert report["mode"] == "replace" and db.stats()["images"] == 1
+    assert db.light_curve("RR Lyr") == []
+    assert Path(report["safety_copy"]).exists()          # the discarded state is still recoverable
+
+    # merging that safety copy back brings the second image in without duplicating the first
+    merged = db.restore(Path(report["safety_copy"]), merge=True)
+    assert merged["mode"] == "merge"
+    assert db.stats()["images"] == 2
+    assert len(db.light_curve("SS Cyg")) == 1            # not doubled
+    assert len(db.light_curve("RR Lyr")) == 1
+
+    junk = tmp_path / "junk.sqlite"
+    junk.write_bytes(b"definitely not a database, just some bytes pretending to be one")
+    with pytest.raises(ValueError):
+        db.inspect(junk)
+    empty = tmp_path / "other.sqlite"
+    import sqlite3
+    sqlite3.connect(empty).execute("CREATE TABLE unrelated (x)")
+    with pytest.raises(ValueError):
+        db.inspect(empty)

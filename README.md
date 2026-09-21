@@ -204,6 +204,9 @@ curve rather than an isolated result.
 | `GET` | `/api/db/near?ra=&dec=&radius_arcmin=` | what was measured near a position |
 | `GET` | `/api/db/images` | the images behind the measurements |
 | `POST` | `/api/db/backfill` | fold the jobs still on disk into the database (idempotent) |
+| `GET` | `/api/db/backup` | download a consistent copy (also kept in `BACKUP_DIR`) |
+| `GET` | `/api/db/backups` | the rotating copies on the server |
+| `POST` | `/api/db/restore` | put a backup back: `?merge=true` keeps both sides, a replace needs `confirm=true` |
 
 Re-analysing the same file supersedes its earlier rows (images are keyed by content hash),
 so repeated runs during a debugging session do not inflate a light curve. Each point keeps
@@ -212,14 +215,31 @@ non-linear flag — a blended 7.8 mag from an 80″/px phone frame should be rec
 such next to a clean 12.0 from a Seestar. A failure to store never loses the analysis: the
 job is saved either way and the log says what happened.
 
-The browser UI has a **Database** view (search, light-curve plot, CSV), and the Android app
-an **archive** screen with the same search and a plotted curve.
+The browser UI has a **Database** view (search, light-curve plot, CSV, backup and restore),
+and the Android app an **archive** screen with the same search and a plotted curve.
+
+Backups go through SQLite's online backup API, so they are consistent even while the server
+is writing — unlike copying the file, which can catch a half-written page or miss the
+write-ahead log. `BACKUP_DIR` keeps the last `BACKUP_KEEP` (10) copies. A restore always
+writes a safety copy of the current archive first and names it in the reply, refuses
+anything that is not a SkyProbe archive, and needs `confirm=true` when it would replace
+rather than merge. Merging is how two machines' archives are joined: images already present
+(by `job_id`) are left alone, so nothing is duplicated.
+
+From the command line:
+
+```bash
+python -m app.db stats                    # what is in the archive
+python -m app.db backup [file]            # take a copy
+python -m app.db restore <file> [--merge] # put one back
+python -m app.db backfill [jobs_dir]      # fold jobs on disk into it
+```
 
 ## Configuration (environment)
 
 `DATA_DIR` · `WORKERS` (parallel jobs) · `MAX_UPLOAD_MB` · `KEEP_JOBS` · `API_TOKEN` ·
 `ASTROMETRY_API_KEY` · `ASTROMETRY_URL` · `SOLVER` · `SOLVE_FIELD` (binary path) ·
-`VSNET_ADDRESS` · `VSNET_INTRO` · `VSNET_FOOTER` · `DB_PATH` ·
+`VSNET_ADDRESS` · `VSNET_INTRO` · `VSNET_FOOTER` · `DB_PATH` · `BACKUP_DIR` · `BACKUP_KEEP` ·
 `SOLVE_TIMEOUT` · `CATALOG_CACHE` · `VIZIER_SERVER` · `GAIA_MAX_RADIUS`.
 
 ## Tests

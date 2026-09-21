@@ -157,6 +157,12 @@
     <div class="tableHead"><h2>Measurement archive</h2><span class="grow"></span>
       <button class="ghost small" id="closeDb">Close</button></div>
     <div class="stat" id="dbStats" style="margin-bottom:14px"></div>
+    <div class="links" style="margin-bottom:12px">
+      <a class="btn small" id="dbBackup" href="/api/db/backup">Download backup</a>
+      <button class="ghost small" id="dbRestoreBtn">Restore from backup…</button>
+      <span class="muted small" id="dbRestoreInfo"></span>
+      <input type="file" id="dbRestoreFile" accept=".sqlite" hidden>
+    </div>
     <div class="tableHead">
       <input id="dbSearch" class="filter" placeholder="Search a star by name or type">
       <label class="check"><input type="checkbox" id="dbRepeat"> only stars with 2+ measurements</label>

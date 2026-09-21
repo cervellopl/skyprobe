@@ -16,6 +16,7 @@ android/gradlew
 android/gradlew.bat
 android/local.properties
 backend/data/
+backend/data/backups/
 backend/static/*.apk
 backend/static/*.map
 skyprobe-debug.apk

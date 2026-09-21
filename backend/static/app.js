@@ -461,3 +461,24 @@ $("#closeDb")?.addEventListener("click", () => $("#dbCard").classList.add("hidde
 $("#dbSearch")?.addEventListener("input", () => { $("#dbStars").classList.remove("hidden"); $("#dbCurve").classList.add("hidden"); listStars(); });
 $("#dbRepeat")?.addEventListener("change", listStars);
 $("#dbCurveClose")?.addEventListener("click", () => { $("#dbCurve").classList.add("hidden"); $("#dbStars").classList.remove("hidden"); });
+
+// ---------------------------------------------------------------- backup / restore
+$("#dbRestoreBtn")?.addEventListener("click", () => $("#dbRestoreFile").click());
+$("#dbRestoreFile")?.addEventListener("change", async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const merge = confirm(`Restore from ${f.name}?\n\nOK = merge into the current archive (keeps both).\n` +
+                        `Cancel = replace it (a safety copy is written first).`);
+  if (!merge && !confirm("Replace the whole archive? The current one is copied to the backups folder first.")) {
+    e.target.value = ""; return;
+  }
+  const fd = new FormData(); fd.append("file", f);
+  $("#dbRestoreInfo").textContent = "restoring…";
+  const r = await fetch(`/api/db/restore?merge=${merge}&confirm=true`, { method: "POST", body: fd });
+  const v = await r.json();
+  e.target.value = "";
+  if (!r.ok) { $("#dbRestoreInfo").textContent = v.detail || "restore failed"; return; }
+  $("#dbRestoreInfo").textContent =
+    `${v.mode}: ${v.before.images} → ${v.after.images} images, safety copy ${v.safety_copy.split("/").pop()}`;
+  openDb();
+});
