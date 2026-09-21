@@ -199,11 +199,15 @@ private fun ResultScreen(job: JobResult, vm: AppViewModel) {
                 Tab(selected = tab == i, onClick = { tab = i }, text = { Text(t, maxLines = 1) })
             }
         }
-        when (tab) {
-            0 -> CandidateList(job.candidates)
-            1 -> VariableList(job, vm)
-            2 -> MinorBodyList(job.minorBodies)
-            else -> DetailsPane(job)
+        // weight(1f), not fillMaxSize(): inside a Column a child without a weight is given the
+        // whole parent height, so the list would run off the bottom of the screen and refuse to scroll
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            when (tab) {
+                0 -> CandidateList(job.candidates)
+                1 -> VariableList(job, vm)
+                2 -> MinorBodyList(job.minorBodies)
+                else -> DetailsPane(job)
+            }
         }
     }
 }
@@ -252,8 +256,15 @@ private fun SummaryRow(job: JobResult) {
             },
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        job.warnings.forEach {
-            Text("⚠ $it", style = MaterialTheme.typography.bodySmall, color = Warn)
+        // only a taste here - the full list is in the Details tab, so the summary cannot
+        // grow until it squeezes the data out of the screen
+        job.warnings.take(2).forEach {
+            Text("⚠ $it", style = MaterialTheme.typography.bodySmall, color = Warn,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+        if (job.warnings.size > 2) {
+            Text("⚠ +${job.warnings.size - 2} more (see Details)",
+                style = MaterialTheme.typography.bodySmall, color = Warn)
         }
     }
 }
@@ -406,6 +417,13 @@ private fun DetailsPane(job: JobResult) {
             Row2("Limiting mag (5σ)", f(it.limitMag, 1))
         }
         job.time?.let { Row2("Time (UTC)", "${it.utcMid}  (${it.source})") }
+        if (job.warnings.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            Text("Warnings", fontWeight = FontWeight.SemiBold)
+            job.warnings.forEach {
+                Text("⚠ $it", style = MaterialTheme.typography.bodySmall, color = Warn)
+            }
+        }
         Spacer(Modifier.height(8.dp))
         Text("Log", fontWeight = FontWeight.SemiBold)
         Text(job.log.joinToString("\n"), fontFamily = FontFamily.Monospace,
