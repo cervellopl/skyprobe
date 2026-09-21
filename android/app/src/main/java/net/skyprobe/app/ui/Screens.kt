@@ -33,6 +33,7 @@ import coil.compose.AsyncImage
 import kotlinx.coroutines.launch
 import net.skyprobe.app.AppViewModel
 import net.skyprobe.app.NOT_CONFIGURED
+import net.skyprobe.app.Phone
 import net.skyprobe.app.UiState
 import net.skyprobe.app.net.Candidate
 import net.skyprobe.app.net.JobResult
@@ -474,11 +475,58 @@ private fun SettingsDialog(state: UiState, vm: AppViewModel, onClose: () -> Unit
                     OutlinedTextField(s.lat, { s = s.copy(lat = it) }, label = { Text("Latitude") }, singleLine = true, modifier = Modifier.weight(1f))
                     OutlinedTextField(s.lon, { s = s.copy(lon = it) }, label = { Text("Longitude") }, singleLine = true, modifier = Modifier.weight(1f))
                 }
-                Text("Latitude/longitude are only used to compute the airmass for AAVSO reports.",
+                LocationRow(onLocation = { lat, lon -> s = s.copy(lat = lat, lon = lon) })
+                Text("Latitude/longitude are only used to compute the airmass. Images that carry GPS "
+                        + "coordinates in their EXIF are handled without this.",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         },
     )
+}
+
+/** "Use my location" - asks for the permission the first time and fills in the two fields. */
+@Composable
+private fun LocationRow(onLocation: (String, String) -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var status by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+
+    fun fetch() {
+        busy = true
+        status = if (Phone.locationEnabled(ctx)) "Waiting for a fix…" else "Location is switched off"
+        scope.launch {
+            val loc = Phone.location(ctx)
+            busy = false
+            if (loc == null) {
+                status = if (Phone.locationEnabled(ctx)) "No fix - try again outdoors"
+                         else "Turn location on in Android settings"
+            } else {
+                onLocation(String.format("%.5f", loc.latitude), String.format("%.5f", loc.longitude))
+                val age = (System.currentTimeMillis() - loc.time) / 60000
+                status = "±${loc.accuracy.toInt()} m" + if (age > 1) ", $age min old" else ", just now"
+            }
+        }
+    }
+
+    val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
+        if (granted.values.any { it }) fetch() else status = "Permission denied - enter the position by hand"
+    }
+
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        OutlinedButton(
+            onClick = { if (Phone.hasPermission(ctx)) fetch() else ask.launch(Phone.PERMISSIONS) },
+            enabled = !busy,
+        ) {
+            Icon(Icons.Default.MyLocation, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Use my location")
+        }
+        if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+        status?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
 }
 
 @Composable
