@@ -8,6 +8,8 @@ GET  /api/jobs/{id}/report.pdf    printable PDF report
 GET  /api/jobs/{id}/vsnet         composed vsnet-obs posting (JSON, or text with ?plain=true)
 DELETE /api/jobs/{id}
 GET  /api/health          capabilities of this server
+GET  /api/db/stats | /api/db/stars | /api/db/star/{name} | /api/db/near | /api/db/images
+POST /api/db/backfill     fold the jobs on disk into the database
 """
 from __future__ import annotations
 
@@ -29,7 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import astrometry, pipeline, report as report_mod, vsnet
+from . import astrometry, db, pipeline, report as report_mod, vsnet
 from .imageio import DEVICE_PRESETS, FITS_EXT, JPEG_EXT, RAW_EXT
 
 VERSION = "1.0.0"
@@ -90,6 +92,11 @@ def _run_job(job: Job, opts: dict):
     try:
         pipeline.run(job, opts, job.dir, job.log)
         job.result.update({"status": "done", "stage": "done", "progress": 100})
+        try:
+            stored = db.ingest(job.result, job.input_path)
+            job.log(f"stored in the database: {stored.get('measurements', 0)} measurements")
+        except Exception as e:      # a database problem must not lose the analysis
+            job.log(f"WARNING could not store in the database: {e}")
     except Exception as e:
         job.result.update({"status": "failed", "stage": "failed", "error": str(e)})
         job.log("ERROR " + "".join(traceback.format_exception_only(type(e), e)).strip())
@@ -228,6 +235,7 @@ def delete_job(job_id: str):
     if r.get("status") in ("queued", "running"):
         raise HTTPException(409, "job still running")
     shutil.rmtree(JOBS_DIR / job_id, ignore_errors=True)
+    db.forget(job_id)
     return {"deleted": job_id}
 
 
@@ -273,6 +281,47 @@ def job_vsnet(job_id: str, observer: str = "", site: str = "", instrument: str =
     if plain:
         return PlainTextResponse(rep["body"])
     return rep
+
+
+@app.get("/api/db/stats", dependencies=[Depends(auth)])
+def db_stats():
+    """Size and span of the measurement archive."""
+    return db.stats()
+
+
+@app.get("/api/db/stars", dependencies=[Depends(auth)])
+def db_stars(q: str = "", limit: int = 100, offset: int = 0, min_points: int = 0):
+    """Stars in the archive, with the number of nights and the observed range."""
+    return db.stars(q=q, limit=min(limit, 500), offset=offset, min_points=min_points)
+
+
+@app.get("/api/db/star/{name}", dependencies=[Depends(auth)])
+def db_star(name: str, csv_format: bool = False):
+    """Every measurement of one star, oldest first - its light curve."""
+    points = db.light_curve(name)
+    if not points:
+        raise HTTPException(404, "no measurements of that star")
+    if csv_format:
+        return _csv(points, ["jd", "mag", "err", "upper_limit", "band", "airmass", "flags",
+                             "job_id", "filename"], f"{name.replace(' ', '_')}.csv")
+    return {"name": name, "points": points}
+
+
+@app.get("/api/db/near", dependencies=[Depends(auth)])
+def db_near(ra: float, dec: float, radius_arcmin: float = 5.0, limit: int = 200):
+    """Everything measured near a position - useful to follow up a candidate."""
+    return db.cone(ra, dec, radius_arcmin, limit)
+
+
+@app.get("/api/db/images", dependencies=[Depends(auth)])
+def db_images(limit: int = 50, offset: int = 0):
+    return db.images(limit=min(limit, 500), offset=offset)
+
+
+@app.post("/api/db/backfill", dependencies=[Depends(auth)])
+def db_backfill():
+    """Fold every job still on disk into the database (idempotent)."""
+    return db.backfill(JOBS_DIR)
 
 
 FILES = {"preview.jpg": "image/jpeg", "annotated.jpg": "image/jpeg", "wcs.fits": "application/fits",

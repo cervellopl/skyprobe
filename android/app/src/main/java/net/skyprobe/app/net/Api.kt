@@ -149,6 +149,35 @@ data class VsnetReport(
     val selection: VsnetSelection = VsnetSelection(),
 )
 
+@Serializable
+data class DbStats(
+    val images: Int = 0, val measurements: Int = 0, val stars: Int = 0, val nights: Int = 0,
+    @SerialName("unidentified_candidates") val unidentified: Int = 0,
+    @SerialName("db_bytes") val dbBytes: Long = 0,
+    @SerialName("first_jd") val firstJd: Double? = null, @SerialName("last_jd") val lastJd: Double? = null,
+)
+
+@Serializable
+data class StarSummary(
+    val name: String = "", val type: String? = null, val points: Int = 0,
+    val brightest: Double? = null, val faintest: Double? = null, val amplitude: Double? = null,
+    @SerialName("mean_mag") val meanMag: Double? = null,
+    @SerialName("last_jd") val lastJd: Double? = null, @SerialName("first_jd") val firstJd: Double? = null,
+    val ra: Double? = null, val dec: Double? = null,
+)
+
+@Serializable
+data class CurvePoint(
+    val jd: Double? = null, val mag: Double? = null, val err: Double? = null,
+    @SerialName("upper_limit") val upperLimit: Int = 0,
+    val band: String? = null, val airmass: Double? = null, val flags: String? = null,
+    @SerialName("job_id") val jobId: String = "", val filename: String? = null,
+    val nonlinear: Int = 0, val camera: String? = null,
+)
+
+@Serializable
+data class LightCurve(val name: String = "", val points: List<CurvePoint> = emptyList())
+
 /** The server refused to compose a posting (e.g. a non-linear camera response). */
 class BlockedException(message: String) : IOException(message)
 
@@ -198,6 +227,15 @@ class SkyProbeApi(baseUrl: String, private val token: String? = null) {
     suspend fun jobs(): List<JobSummary> = get("$base/api/jobs?limit=25") { json.decodeFromString(it) }
 
     suspend fun text(url: String): String = get(url) { it }
+
+    suspend fun dbStats(): DbStats = get("$base/api/db/stats") { json.decodeFromString(it) }
+
+    suspend fun dbStars(query: String, minPoints: Int = 1, limit: Int = 200): List<StarSummary> =
+        get("$base/api/db/stars?q=${java.net.URLEncoder.encode(query, "UTF-8")}" +
+            "&min_points=$minPoints&limit=$limit") { json.decodeFromString(it) }
+
+    suspend fun dbStar(name: String): LightCurve =
+        get("$base/api/db/star/${java.net.URLEncoder.encode(name, "UTF-8")}") { json.decodeFromString(it) }
 
     /** Composes (never sends) a vsnet-obs posting for this job. */
     suspend fun vsnet(jobId: String, observer: String, site: String, instrument: String,

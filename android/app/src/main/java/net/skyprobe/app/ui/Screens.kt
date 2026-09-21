@@ -51,13 +51,14 @@ import net.skyprobe.app.net.BlockedException
 import net.skyprobe.app.net.VsnetReport
 import kotlin.math.abs
 
-private fun f(v: Double?, d: Int = 2): String = if (v == null || v.isNaN()) "–" else String.format("%.${d}f", v)
+internal fun f(v: Double?, d: Int = 2): String = if (v == null || v.isNaN()) "–" else String.format("%.${d}f", v)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AppScaffold(state: UiState, vm: AppViewModel) {
     var showSettings by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
+    var showDatabase by remember { mutableStateOf(false) }
     val snack = remember { SnackbarHostState() }
     LaunchedEffect(state.error) { state.error?.let { snack.showSnackbar(it) } }
 
@@ -71,6 +72,7 @@ fun AppScaffold(state: UiState, vm: AppViewModel) {
                     }
                 },
                 actions = {
+                    IconButton(onClick = { showDatabase = true }) { Icon(Icons.Default.Dataset, "Archive") }
                     IconButton(onClick = { showHistory = true; vm.loadHistory() }) { Icon(Icons.Default.History, "History") }
                     IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, "Settings") }
                 },
@@ -80,7 +82,11 @@ fun AppScaffold(state: UiState, vm: AppViewModel) {
     ) { pad ->
         Box(Modifier.padding(pad)) {
             val job = state.job
-            if (job != null && job.done) ResultScreen(job, vm) else HomeScreen(state, vm)
+            when {
+                showDatabase -> DatabaseScreen(vm) { showDatabase = false }
+                job != null && job.done -> ResultScreen(job, vm)
+                else -> HomeScreen(state, vm)
+            }
         }
     }
     if (showSettings) SettingsDialog(state, vm) { showSettings = false }
@@ -704,7 +710,7 @@ private fun Row2(k: String, v: String) = Row(Modifier.fillMaxWidth()) {
 }
 
 @Composable
-private fun Badge(text: String, color: Color) = Surface(color = color.copy(alpha = 0.18f), shape = RoundedCornerShape(99.dp)) {
+internal fun Badge(text: String, color: Color) = Surface(color = color.copy(alpha = 0.18f), shape = RoundedCornerShape(99.dp)) {
     Text(text, Modifier.padding(horizontal = 8.dp, vertical = 2.dp), color = color, style = MaterialTheme.typography.labelSmall)
 }
 

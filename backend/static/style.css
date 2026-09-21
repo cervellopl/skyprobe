@@ -96,3 +96,11 @@ dialog::backdrop { background: rgba(0,0,0,.55); }
 dialog textarea { width: 100%; background: var(--panel2); color: var(--text); border: 1px solid var(--line);
   border-radius: 8px; padding: 10px; font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace; resize: vertical; }
 .btn.disabled { opacity: .45; pointer-events: none; }
+
+#dbPlot { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; }
+#dbPlot .axis { stroke: var(--line); stroke-width: 1; }
+#dbPlot .tick { fill: var(--muted); font-size: 10px; }
+#dbPlot .pt { fill: var(--cyan); }
+#dbPlot .pt.limit { fill: none; stroke: var(--muted); }
+#dbPlot .bar { stroke: var(--cyan); stroke-width: 1; opacity: .6; }
+#dbPlot .label { fill: var(--muted); font-size: 11px; }

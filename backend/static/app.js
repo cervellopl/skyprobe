@@ -377,3 +377,87 @@ $("#vsnetCopy")?.addEventListener("click", async () => {
   catch { $("#vsnetBody").select(); }
   setTimeout(() => ($("#vsnetCopy").textContent = "Copy"), 1500);
 });
+
+// ---------------------------------------------------------------- measurement archive
+const jdToDate = (jd) => new Date((jd - 2440587.5) * 86400000).toISOString().slice(0, 16).replace("T", " ");
+
+async function openDb() {
+  $("#dbCard").classList.remove("hidden");
+  $("#dbCurve").classList.add("hidden");
+  const s = await (await fetch("/api/db/stats")).json();
+  $("#dbStats").innerHTML = [
+    [s.images, "images"], [s.measurements, "measurements"], [s.stars, "stars"],
+    [s.nights, "nights"], [s.unidentified_candidates, "unidentified"],
+    [(s.db_bytes / 1048576).toFixed(1) + " MB", "database"],
+  ].map(([v, k]) => `<div><b>${esc(v)}</b><span class="muted small">${k}</span></div>`).join("");
+  await listStars();
+  $("#dbCard").scrollIntoView({ behavior: "smooth" });
+}
+
+async function listStars() {
+  const q = encodeURIComponent($("#dbSearch").value.trim());
+  const min = $("#dbRepeat").checked ? 2 : 1;
+  const rows = await (await fetch(`/api/db/stars?q=${q}&min_points=${min}&limit=200`)).json();
+  const el = $("#dbStars");
+  if (!rows.length) { el.innerHTML = `<p class="empty">Nothing in the archive matches.</p>`; return; }
+  el.innerHTML = `<div class="tbl"><table><thead><tr><th>Star</th><th>Type</th><th>Points</th><th>Limits</th>
+    <th>Brightest</th><th>Faintest</th><th>Range</th><th>Last seen</th></tr></thead><tbody>${rows.map((r) => `
+    <tr data-name="${esc(r.name)}"><td>${esc(r.name)}</td><td>${esc(r.type || "")}</td><td>${r.points}</td>
+    <td class="muted">${r.limits || 0}</td>
+    <td>${fmt(r.brightest, 2)}</td><td>${fmt(r.faintest, 2)}</td>
+    <td>${r.amplitude > 0.05 ? fmt(r.amplitude, 2) + " mag" : "–"}</td>
+    <td>${r.last_jd ? jdToDate(r.last_jd) : "–"}</td></tr>`).join("")}</tbody></table></div>`;
+  el.querySelectorAll("tr[data-name]").forEach((tr) => tr.onclick = () => showCurve(tr.dataset.name));
+}
+
+async function showCurve(name) {
+  const r = await (await fetch(`/api/db/star/${encodeURIComponent(name)}`)).json();
+  if (r.detail) return;
+  $("#dbCurve").classList.remove("hidden");
+  $("#dbStars").classList.add("hidden");
+  $("#dbCurveName").textContent = name;
+  $("#dbCurveCsv").href = `/api/db/star/${encodeURIComponent(name)}?csv_format=true`;
+  plotCurve(r.points);
+  $("#dbPoints").innerHTML = `<div class="tbl"><table><thead><tr><th>Date (UT)</th><th>JD</th><th>Mag</th>
+    <th>Err</th><th>Band</th><th>Camera</th><th>Flags</th><th>Image</th></tr></thead><tbody>${r.points.map((p) => `
+    <tr><td>${p.jd ? jdToDate(p.jd) : "–"}</td><td>${fmt(p.jd, 4)}</td>
+    <td>${p.upper_limit ? "&lt;" : ""}${fmt(p.mag, 3)}</td><td>${fmt(p.err, 3)}</td><td>${esc(p.band || "")}</td>
+    <td>${esc(p.camera || "")}</td>
+    <td>${p.nonlinear ? '<span class="badge b-yellow">non-linear</span> ' : ""}${esc(p.flags || "")}</td>
+    <td><a href="#job=${esc(p.job_id)}">open</a></td></tr>`).join("")}</tbody></table></div>`;
+}
+
+function plotCurve(points) {
+  const svg = $("#dbPlot"), W = 720, H = 260, pad = { l: 46, r: 12, t: 12, b: 28 };
+  const good = points.filter((p) => p.jd != null && p.mag != null);
+  if (good.length < 1) { svg.innerHTML = `<text x="20" y="30" class="label">no dated measurements</text>`; return; }
+  const jds = good.map((p) => p.jd), mags = good.map((p) => p.mag);
+  const jd0 = Math.min(...jds), jd1 = Math.max(...jds);
+  const spanX = (jd1 - jd0) || 1;
+  const m0 = Math.min(...mags), m1 = Math.max(...mags);
+  const padY = Math.max((m1 - m0) * 0.15, 0.05);
+  const lo = m0 - padY, hi = m1 + padY;                    // magnitudes: brighter is up
+  const x = (jd) => pad.l + ((jd - jd0) / spanX) * (W - pad.l - pad.r);
+  const y = (m) => pad.t + ((m - lo) / (hi - lo)) * (H - pad.t - pad.b);
+  const ticks = [lo, (lo + hi) / 2, hi].map((m) =>
+    `<text class="tick" x="6" y="${y(m) + 3}">${m.toFixed(2)}</text>
+     <line class="axis" x1="${pad.l}" y1="${y(m)}" x2="${W - pad.r}" y2="${y(m)}" opacity=".35"/>`).join("");
+  const dates = [jd0, jd1].map((jd, i) =>
+    `<text class="tick" x="${x(jd)}" y="${H - 8}" text-anchor="${i ? "end" : "start"}">${jdToDate(jd).slice(0, 10)}</text>`).join("");
+  const marks = good.map((p) => {
+    const cx = x(p.jd), cy = y(p.mag);
+    const bar = p.err ? `<line class="bar" x1="${cx}" y1="${y(p.mag - p.err)}" x2="${cx}" y2="${y(p.mag + p.err)}"/>` : "";
+    return bar + (p.upper_limit
+      ? `<path class="pt limit" d="M${cx - 4},${cy} l8,0 M${cx},${cy} l0,8 M${cx - 3},${cy + 5} l3,3 l3,-3"><title>${fmt(p.mag, 2)} limit</title></path>`
+      : `<circle class="pt" cx="${cx}" cy="${cy}" r="3.5"><title>${jdToDate(p.jd)} — ${fmt(p.mag, 3)} ${esc(p.band || "")}</title></circle>`);
+  }).join("");
+  svg.innerHTML = `${ticks}${dates}
+    <line class="axis" x1="${pad.l}" y1="${pad.t}" x2="${pad.l}" y2="${H - pad.b}"/>
+    <line class="axis" x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}"/>${marks}`;
+}
+
+$("#btnDb")?.addEventListener("click", openDb);
+$("#closeDb")?.addEventListener("click", () => $("#dbCard").classList.add("hidden"));
+$("#dbSearch")?.addEventListener("input", () => { $("#dbStars").classList.remove("hidden"); $("#dbCurve").classList.add("hidden"); listStars(); });
+$("#dbRepeat")?.addEventListener("change", listStars);
+$("#dbCurveClose")?.addEventListener("click", () => { $("#dbCurve").classList.add("hidden"); $("#dbStars").classList.remove("hidden"); });

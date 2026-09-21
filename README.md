@@ -189,11 +189,37 @@ image whose camera response was found to be non-linear is **refused** (HTTP 409,
 reason and a short preview but no ready-to-send text) unless `force=true` is passed - a
 setting in the app and a checkbox in the web UI.
 
+## The measurement archive
+
+Every finished analysis is folded into one SQLite file (`DB_PATH`, by default
+`backend/data/skyprobe.sqlite`): the image with its solution and calibration, one row per
+measured star, and the transient candidates. A single frame is then a point on a light
+curve rather than an isolated result.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/db/stats` | images, measurements, distinct stars, nights, size |
+| `GET` | `/api/db/stars?q=&min_points=` | stars in the archive with their range and last sighting |
+| `GET` | `/api/db/star/{name}` | every measurement of one star (`?csv_format=true` for CSV) |
+| `GET` | `/api/db/near?ra=&dec=&radius_arcmin=` | what was measured near a position |
+| `GET` | `/api/db/images` | the images behind the measurements |
+| `POST` | `/api/db/backfill` | fold the jobs still on disk into the database (idempotent) |
+
+Re-analysing the same file supersedes its earlier rows (images are keyed by content hash),
+so repeated runs during a debugging session do not inflate a light curve. Each point keeps
+the context it needs to be judged: band, camera, zero point, limiting magnitude and the
+non-linear flag — a blended 7.8 mag from an 80″/px phone frame should be recognisable as
+such next to a clean 12.0 from a Seestar. A failure to store never loses the analysis: the
+job is saved either way and the log says what happened.
+
+The browser UI has a **Database** view (search, light-curve plot, CSV), and the Android app
+an **archive** screen with the same search and a plotted curve.
+
 ## Configuration (environment)
 
 `DATA_DIR` · `WORKERS` (parallel jobs) · `MAX_UPLOAD_MB` · `KEEP_JOBS` · `API_TOKEN` ·
 `ASTROMETRY_API_KEY` · `ASTROMETRY_URL` · `SOLVER` · `SOLVE_FIELD` (binary path) ·
-`VSNET_ADDRESS` · `VSNET_INTRO` · `VSNET_FOOTER` ·
+`VSNET_ADDRESS` · `VSNET_INTRO` · `VSNET_FOOTER` · `DB_PATH` ·
 `SOLVE_TIMEOUT` · `CATALOG_CACHE` · `VIZIER_SERVER` · `GAIA_MAX_RADIUS`.
 
 ## Tests

@@ -281,3 +281,57 @@ def test_pdf_report_is_generated(tmp_path):
     out = build_pdf(result, tmp_path, tmp_path / "r.pdf")
     data = out.read_bytes()
     assert data.startswith(b"%PDF") and len(data) > 2000
+
+
+def test_database_ingest_and_queries(tmp_path, monkeypatch):
+    """One image in, a light curve out - and the same file twice does not double-count."""
+    from app import db
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.sqlite")
+    monkeypatch.setattr(db, "_conn", None)
+    image = tmp_path / "input.fits"
+    image.write_bytes(b"not really a fits, but it hashes")
+
+    def result(job_id, jd, mag):
+        return {
+            "id": job_id, "status": "done", "filename": "a.fits", "created": 1.0,
+            "time": {"jd_mid": jd, "utc_mid": "2000-01-01T12:00:00", "source": "fits"},
+            "solution": {"ra": 10.0, "dec": 20.0, "pixel_scale": 2.4, "fov_w_deg": 0.5, "fov_h_deg": 0.4},
+            "calibration": {"band": "CV", "zero_point": 20.0, "rms": 0.02, "limit_mag_5sigma": 17.0,
+                            "n_comps": 30, "response_slope": 0.0},
+            "meta": {"make": "ZWO", "model": "Seestar S50", "exptime": 600.0},
+            "variables": [
+                {"name": "SS Cyg", "oid": 1, "type": "UGSS", "ra": 10.0, "dec": 20.0, "mag": mag,
+                 "err": 0.02, "upper_limit": False, "snr": 90.0, "flags": []},
+                {"name": "RR Lyr", "oid": 2, "type": "RRAB", "ra": 10.1, "dec": 20.1, "mag": 15.0,
+                 "upper_limit": True, "flags": ["fainter than"]},
+            ],
+            "candidates": [{"status": "unidentified", "kind": "new_star", "label": "possible nova",
+                            "ra": 10.2, "dec": 20.2, "mag": 12.0, "snr": 50.0, "fwhm_px": 3.0}],
+        }
+
+    assert db.ingest(result("a" * 16, 2451545.0, 11.8), image)["stored"]
+    assert db.ingest(result("b" * 16, 2451546.0, 12.1), None)["stored"]
+    s = db.stats()
+    assert s["images"] == 2 and s["measurements"] == 4 and s["unidentified_candidates"] == 2
+
+    curve = db.light_curve("SS Cyg")
+    assert [p["mag"] for p in curve] == [11.8, 12.1]        # ordered in time
+    assert curve[0]["camera"] == "ZWO Seestar S50"
+
+    listed = db.stars(q="SS")
+    assert listed[0]["name"] == "SS Cyg" and listed[0]["points"] == 2
+    assert abs(listed[0]["amplitude"] - 0.3) < 1e-6
+    rr = db.stars(q="RR")[0]          # only ever seen as a limit, but still listed
+    assert rr["points"] == 0 and rr["limits"] == 2 and rr["brightest"] is None
+
+    near = db.cone(10.0, 20.0, radius_arcmin=1.0)
+    assert near and near[0]["name"] == "SS Cyg" and near[0]["separation_arcmin"] < 0.01
+
+    # re-analysing the same file supersedes the earlier rows instead of duplicating them
+    assert db.ingest(result("c" * 16, 2451547.0, 12.4), image)["stored"]
+    assert db.stats()["images"] == 2
+    assert [p["mag"] for p in db.light_curve("SS Cyg")] == [12.1, 12.4]
+
+    db.forget("c" * 16)
+    assert db.stats()["images"] == 1

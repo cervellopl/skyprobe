@@ -209,6 +209,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(job = null, busy = false, error = null, uploadProgress = 0f) }
     }
 
+    suspend fun dbStats() = api.dbStats()
+
+    suspend fun dbStars(query: String, repeatedOnly: Boolean) =
+        api.dbStars(query, minPoints = if (repeatedOnly) 2 else 1)
+
+    suspend fun dbStar(name: String) = api.dbStar(name)
+
     suspend fun aavsoReport(id: String): String = api.text(api.fileUrl(id, "aavso.txt"))
 
     suspend fun vsnetReport(id: String, includeLimits: Boolean) = with(_state.value.settings) {
