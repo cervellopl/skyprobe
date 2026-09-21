@@ -176,6 +176,18 @@ data class CurvePoint(
 )
 
 @Serializable
+data class RestoreCounts(val images: Int = 0, val measurements: Int = 0, val candidates: Int = 0)
+
+@Serializable
+data class RestoreReport(
+    val mode: String = "", val incoming: RestoreCounts = RestoreCounts(),
+    val before: RestoreCounts = RestoreCounts(), val after: RestoreCounts = RestoreCounts(),
+    @SerialName("safety_copy") val safetyCopy: String = "",
+) {
+    val safetyCopyName get() = safetyCopy.substringAfterLast('/')
+}
+
+@Serializable
 data class LightCurve(val name: String = "", val points: List<CurvePoint> = emptyList())
 
 /** The server refused to compose a posting (e.g. a non-linear camera response). */
@@ -233,6 +245,29 @@ class SkyProbeApi(baseUrl: String, private val token: String? = null) {
     suspend fun dbStars(query: String, minPoints: Int = 1, limit: Int = 200): List<StarSummary> =
         get("$base/api/db/stars?q=${java.net.URLEncoder.encode(query, "UTF-8")}" +
             "&min_points=$minPoints&limit=$limit") { json.decodeFromString(it) }
+
+    fun backupUrl() = "$base/api/db/backup"
+
+    /** Uploads a backup file: merge keeps both archives, replace swaps this one out. */
+    suspend fun dbRestore(resolver: ContentResolver, uri: Uri, merge: Boolean): RestoreReport =
+        withContext(Dispatchers.IO) {
+            val body = object : RequestBody() {
+                override fun contentType() = "application/octet-stream".toMediaType()
+                override fun writeTo(sink: BufferedSink) {
+                    resolver.openInputStream(uri)?.use { input ->
+                        input.source().use { sink.writeAll(it) }
+                    } ?: throw IOException("Cannot read the selected file")
+                }
+            }
+            val part = MultipartBody.Builder().setType(MultipartBody.FORM)
+                .addFormDataPart("file", displayName(resolver, uri), body).build()
+            val url = "$base/api/db/restore?merge=$merge&confirm=true"
+            client.newCall(req(url).post(part).build()).execute().use { r ->
+                val text = r.body?.string().orEmpty()
+                if (!r.isSuccessful) throw IOException(errorMessage(text, r.code))
+                json.decodeFromString<RestoreReport>(text)
+            }
+        }
 
     suspend fun dbStar(name: String): LightCurve =
         get("$base/api/db/star/${java.net.URLEncoder.encode(name, "UTF-8")}") { json.decodeFromString(it) }

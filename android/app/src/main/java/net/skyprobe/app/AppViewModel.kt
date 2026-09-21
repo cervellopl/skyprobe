@@ -216,6 +216,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     suspend fun dbStar(name: String) = api.dbStar(name)
 
+    suspend fun dbRestore(uri: Uri, merge: Boolean) =
+        api.dbRestore(getApplication<Application>().contentResolver, uri, merge)
+
     suspend fun aavsoReport(id: String): String = api.text(api.fileUrl(id, "aavso.txt"))
 
     suspend fun vsnetReport(id: String, includeLimits: Boolean) = with(_state.value.settings) {

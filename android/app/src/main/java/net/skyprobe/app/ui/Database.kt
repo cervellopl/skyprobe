@@ -18,10 +18,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
+import kotlinx.coroutines.launch
 import net.skyprobe.app.AppViewModel
 import net.skyprobe.app.net.CurvePoint
 import net.skyprobe.app.net.DbStats
@@ -79,6 +84,7 @@ fun DatabaseScreen(vm: AppViewModel, onClose: () -> Unit) {
                 Stat(String.format(Locale.US, "%.1f MB", s.dbBytes / 1048576.0), "database")
             }
         }
+        BackupRow(vm)
         Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(query, { query = it }, label = { Text("Search a star") },
                 singleLine = true, modifier = Modifier.weight(1f))
@@ -115,6 +121,69 @@ fun DatabaseScreen(vm: AppViewModel, onClose: () -> Unit) {
                 }
             }
         }
+    }
+}
+
+/** Download a copy of the archive, or put one back. */
+@Composable
+private fun BackupRow(vm: AppViewModel) {
+    val uriHandler = LocalUriHandler.current
+    val scope = rememberCoroutineScope()
+    var pending by remember { mutableStateOf<Uri?>(null) }
+    var status by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { pending = it }
+
+    fun run(uri: Uri, merge: Boolean) {
+        pending = null
+        busy = true
+        status = if (merge) "Merging…" else "Restoring…"
+        scope.launch {
+            runCatching { vm.dbRestore(uri, merge) }
+                .onSuccess {
+                    status = "${it.mode}: ${it.before.images} → ${it.after.images} images, " +
+                        "safety copy ${it.safetyCopyName}"
+                }
+                .onFailure { status = it.message ?: "restore failed" }
+            busy = false
+        }
+    }
+
+    Column(Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedButton(onClick = { uriHandler.openUri(vm.api.backupUrl()) }, enabled = !busy,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
+                Text("Download backup", style = MaterialTheme.typography.labelLarge)
+            }
+            OutlinedButton(onClick = { picker.launch("*/*") }, enabled = !busy,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
+                Text("Restore…", style = MaterialTheme.typography.labelLarge)
+            }
+            if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+        }
+        status?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+
+    pending?.let { uri ->
+        AlertDialog(
+            onDismissRequest = { pending = null },
+            title = { Text("Restore the archive") },
+            text = {
+                Text("Merge keeps what is here and adds the images that are missing.\n\n" +
+                     "Replace swaps the archive for the backup - a safety copy of the current one " +
+                     "is written on the server first.")
+            },
+            confirmButton = { TextButton(onClick = { run(uri, merge = true) }) { Text("Merge") } },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { run(uri, merge = false) }) { Text("Replace", color = Danger) }
+                    TextButton(onClick = { pending = null }) { Text("Cancel") }
+                }
+            },
+        )
     }
 }
 
