@@ -63,6 +63,9 @@
           </label>
           <label>Catalogue mag limit<input name="mag_limit" inputmode="decimal" placeholder="auto"></label>
           <label>AAVSO observer code<input name="obscode" id="obscode" placeholder="XXX"></label>
+          <label>Observer name (VSNET)<input id="observer" placeholder="Jan Kowalski"></label>
+          <label>Observing site<input id="site" placeholder="Warsaw, Poland"></label>
+          <label class="span2">Instrument description<input id="instrument" placeholder="Galaxy S25 Ultra, 23 mm f/1.7, 25 s"></label>
           <label>Solver
             <select name="solver"><option value="auto">auto</option><option value="local">local solve-field</option><option value="remote">nova.astrometry.net</option></select>
           </label>
@@ -115,7 +118,8 @@
       <div class="tableHead"><h2>Variable stars</h2>
         <input id="varFilter" placeholder="Filter by name or type" class="filter">
         <span class="grow"></span>
-        <a class="ghost small btn" id="dlPhot">CSV</a><a class="ghost small btn" id="dlAavso">AAVSO report</a></div>
+        <a class="ghost small btn" id="dlPhot">CSV</a><a class="ghost small btn" id="dlAavso">AAVSO report</a>
+        <button class="ghost small" id="btnVsnet">vsnet-obs…</button></div>
       <div id="variables"></div>
     </div>
 
@@ -129,7 +133,25 @@
     </div>
   </section>
 
-  <section id="historyCard" class="card hidden">
+  <dialog id="vsnetDlg">
+  <form method="dialog">
+    <div class="tableHead"><h2>Report to vsnet-obs</h2><span class="grow"></span><button class="ghost small">Close</button></div>
+  </form>
+  <p class="muted small" id="vsnetInfo"></p>
+  <div class="card warn hidden" id="vsnetBlocked"></div>
+  <label class="check"><input type="checkbox" id="vsnetLimits"> include fainter-than limits</label>
+  <textarea id="vsnetBody" rows="16" spellcheck="false"></textarea>
+  <div class="links">
+    <a class="btn small" id="vsnetMail">Open in mail app</a>
+    <button class="ghost small" id="vsnetCopy">Copy</button>
+    <button class="ghost small" id="vsnetTxt">Download .txt</button>
+  </div>
+  <p class="muted small">vsnet-obs is a mailing list: the message has to be sent from the address you
+    subscribed with, so SkyProbe only composes it. Subscribe at
+    <a href="http://ooruri.kusastro.kyoto-u.ac.jp/" target="_blank" rel="noopener">ooruri.kusastro.kyoto-u.ac.jp</a>.</p>
+</dialog>
+
+<section id="historyCard" class="card hidden">
     <div class="tableHead"><h2>Recent analyses</h2><span class="grow"></span><button class="ghost small" id="closeHistory">Close</button></div>
     <div id="history"></div>
   </section>

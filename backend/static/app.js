@@ -19,7 +19,7 @@ fetch("/api/health").then((r) => r.json()).then((h) => {
 }).catch(() => { $("#serverStatus").textContent = "offline"; });
 
 // ---------------------------------------------------------------- form
-for (const id of ["apikey", "obscode"]) { const v = store.get("sp_" + id); if (v) $("#" + id).value = v; }
+for (const id of ["apikey", "obscode", "observer", "site", "instrument"]) { const v = store.get("sp_" + id); if (v) $("#" + id).value = v; }
 for (const k of ["lat", "lon"]) { const v = store.get("sp_" + k); if (v) $(`[name=${k}]`).value = v; }
 
 const drop = $("#drop"), fileInput = $("#file");
@@ -48,7 +48,7 @@ $("#form").addEventListener("submit", (e) => {
   for (const k of ["photometry", "transients"]) fd.set(k, $(`[name=${k}]`).checked ? "true" : "false");
   const t = fd.get("obs_time"); if (t) fd.set("obs_time", t.length === 16 ? t + ":00" : t);
   for (const [k, v] of [...fd.entries()]) if (v === "" && k !== "file") fd.delete(k);
-  store.set("sp_apikey", $("#apikey").value); store.set("sp_obscode", $("#obscode").value);
+  for (const id of ["apikey", "obscode", "observer", "site", "instrument"]) store.set("sp_" + id, $("#" + id).value);
   upload(fd);
 });
 
@@ -100,6 +100,7 @@ function render(r) {
   const base = `/api/jobs/${r.id}/`;
   $("#dlCand").href = base + "candidates.csv"; $("#dlPhot").href = base + "photometry.csv"; $("#dlAavso").href = base + "aavso.txt";
   $("#dlAavso").classList.toggle("hidden", !r.time);
+  $("#btnVsnet").classList.toggle("hidden", !r.time);
   const img = $("#img");
   img.onload = () => { $("#overlay").setAttribute("viewBox", `0 0 ${img.naturalWidth} ${img.naturalHeight}`);
     $("#overlay").setAttribute("width", img.naturalWidth); $("#overlay").setAttribute("height", img.naturalHeight); fit(); drawOverlay(); };
@@ -330,3 +331,35 @@ $("#closeHistory").onclick = () => $("#historyCard").classList.add("hidden");
 
 const m = location.hash.match(/job=([a-f0-9]{16})/);
 if (m) poll(m[1]);
+
+// ---------------------------------------------------------------- vsnet-obs
+async function loadVsnet() {
+  const p = new URLSearchParams({
+    observer: $("#observer").value || "", site: $("#site").value || "",
+    instrument: $("#instrument").value || "", include_limits: $("#vsnetLimits").checked ? "true" : "false",
+  });
+  const r = await fetch(`/api/jobs/${job.id}/vsnet?${p}`);
+  const v = await r.json();
+  if (!r.ok) { $("#vsnetInfo").textContent = v.detail || "could not compose the report"; return; }
+  const sel = v.selection || {};
+  $("#vsnetInfo").textContent = `${v.n_observations} observations of ${sel.total} measured ` +
+    `(dropped: ${sel.dropped_survey_id || 0} survey IDs, ${sel.dropped_flagged || 0} flagged, ` +
+    `${sel.dropped_error || 0} too noisy, ${sel.dropped_limits || 0} limits` +
+    (sel.over_limit ? `, ${sel.over_limit} over the 50-line cap` : "") + ")";
+  $("#vsnetBlocked").classList.toggle("hidden", !v.blocked);
+  $("#vsnetBlocked").textContent = v.blocked_reason || "";
+  $("#vsnetBody").value = v.body;
+  $("#vsnetMail").href = `mailto:${v.to}?subject=${encodeURIComponent(v.subject)}&body=${encodeURIComponent(v.body)}`;
+  $("#vsnetTxt").onclick = () => {
+    const url = URL.createObjectURL(new Blob([v.body], { type: "text/plain" }));
+    const a = document.createElement("a"); a.href = url; a.download = `vsnet_${job.id}.txt`; a.click();
+    URL.revokeObjectURL(url);
+  };
+}
+$("#btnVsnet")?.addEventListener("click", async () => { $("#vsnetDlg").showModal(); await loadVsnet(); });
+$("#vsnetLimits")?.addEventListener("change", loadVsnet);
+$("#vsnetCopy")?.addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText($("#vsnetBody").value); $("#vsnetCopy").textContent = "Copied"; }
+  catch { $("#vsnetBody").select(); }
+  setTimeout(() => ($("#vsnetCopy").textContent = "Copy"), 1500);
+});

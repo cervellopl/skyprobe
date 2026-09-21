@@ -1,6 +1,10 @@
 package net.skyprobe.app.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -43,6 +47,7 @@ import net.skyprobe.app.net.Candidate
 import net.skyprobe.app.net.JobResult
 import net.skyprobe.app.net.MinorBody
 import net.skyprobe.app.net.Variable
+import net.skyprobe.app.net.VsnetReport
 import kotlin.math.abs
 
 private fun f(v: Double?, d: Int = 2): String = if (v == null || v.isNaN()) "–" else String.format("%.${d}f", v)
@@ -205,6 +210,7 @@ private enum class CandSort(val label: String) { BRIGHT("Brightest"), SNR("Stron
 private fun ResultScreen(job: JobResult, vm: AppViewModel) {
     var tab by remember { mutableIntStateOf(0) }
     var imageTall by remember { mutableStateOf(false) }
+    var showVsnet by remember { mutableStateOf(false) }
     // kept across tab switches, so going back to a list finds it as it was left
     var query by remember { mutableStateOf("") }
     var varSort by remember { mutableStateOf(VarSort.BRIGHT) }
@@ -259,6 +265,7 @@ private fun ResultScreen(job: JobResult, vm: AppViewModel) {
     LazyColumn(Modifier.fillMaxSize()) {
         item(key = "image") { AnnotatedImage(vm.api.fileUrl(job.id, "annotated.jpg"), imageTall) { imageTall = !imageTall } }
         item(key = "summary") { SummaryRow(job) }
+        item(key = "actions") { ResultActions(job, vm) { showVsnet = true } }
         stickyHeader(key = "tabs") {
             Surface(tonalElevation = 3.dp, shadowElevation = 3.dp) {
                 ScrollableTabRow(selectedTabIndex = tab, edgePadding = 8.dp) {
@@ -310,6 +317,118 @@ private fun ResultScreen(job: JobResult, vm: AppViewModel) {
         }
         item(key = "tail") { Spacer(Modifier.height(24.dp)) }
     }
+    if (showVsnet) VsnetDialog(job, vm) { showVsnet = false }
+}
+
+@Composable
+private fun ResultActions(job: JobResult, vm: AppViewModel, onVsnet: () -> Unit) {
+    val uri = LocalUriHandler.current
+    Row(Modifier.padding(horizontal = 12.dp, vertical = 2.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(onClick = { uri.openUri(vm.api.fileUrl(job.id, "report.pdf")) },
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
+            Icon(Icons.Default.PictureAsPdf, null, Modifier.size(16.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("PDF report", style = MaterialTheme.typography.labelLarge)
+        }
+        if (job.time != null) {
+            OutlinedButton(onClick = onVsnet, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
+                Icon(Icons.Default.Send, null, Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("vsnet-obs", style = MaterialTheme.typography.labelLarge)
+            }
+        }
+    }
+}
+
+/**
+ * Composes a vsnet-obs posting and hands it to the mail app. It is never sent from the
+ * server: the list expects the message to come from the observer's subscribed address.
+ */
+@Composable
+private fun VsnetDialog(job: JobResult, vm: AppViewModel, onClose: () -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var report by remember { mutableStateOf<VsnetReport?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var includeLimits by remember { mutableStateOf(false) }
+    var acknowledged by remember { mutableStateOf(false) }
+    var loading by remember { mutableStateOf(true) }
+
+    LaunchedEffect(includeLimits) {
+        loading = true
+        runCatching { vm.vsnetReport(job.id, includeLimits) }
+            .onSuccess { report = it; error = null }
+            .onFailure { error = it.message }
+        loading = false
+    }
+
+    val rep = report
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text("Report to vsnet-obs") },
+        confirmButton = {
+            TextButton(
+                enabled = rep != null && rep.nObservations > 0 && (!rep.blocked || acknowledged),
+                onClick = {
+                    rep ?: return@TextButton
+                    val send = Intent(Intent.ACTION_SENDTO).apply {
+                        data = Uri.parse("mailto:${rep.to}")
+                        putExtra(Intent.EXTRA_SUBJECT, rep.subject)
+                        putExtra(Intent.EXTRA_TEXT, rep.body)
+                    }
+                    runCatching { ctx.startActivity(Intent.createChooser(send, "Send to vsnet-obs")) }
+                    onClose()
+                },
+            ) { Text("Open in mail app") }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = {
+                    rep?.let {
+                        val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        cm.setPrimaryClip(ClipData.newPlainText("vsnet-obs", it.body))
+                    }
+                }) { Text("Copy") }
+                TextButton(onClick = onClose) { Text("Close") }
+            }
+        },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                when {
+                    loading -> Text("Composing…")
+                    error != null -> Text(error!!, color = Danger)
+                    rep != null -> {
+                        val s = rep.selection
+                        Text("${rep.nObservations} observations of ${s.total} measured",
+                            fontWeight = FontWeight.SemiBold)
+                        Text("dropped: ${s.droppedSurveyId} survey IDs, ${s.droppedFlagged} flagged, " +
+                                "${s.droppedError} too noisy, ${s.droppedLimits} limits" +
+                                if (s.overLimit > 0) ", ${s.overLimit} over the line cap" else "",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(includeLimits, { includeLimits = it })
+                            Text("include fainter-than limits", style = MaterialTheme.typography.bodySmall)
+                        }
+                        if (rep.blocked) {
+                            Text("⚠ ${rep.blockedReason}", color = Warn, style = MaterialTheme.typography.bodySmall)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(acknowledged, { acknowledged = it })
+                                Text("send anyway", style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                        Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(8.dp)) {
+                            Text(rep.body, Modifier.padding(8.dp), fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall)
+                        }
+                        Text("vsnet-obs is a mailing list: send it from the address you subscribed with.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        },
+    )
 }
 
 private class Chip(val label: String, val on: Boolean, val toggle: () -> Unit)
@@ -604,6 +723,11 @@ private fun SettingsDialog(state: UiState, vm: AppViewModel, onClose: () -> Unit
                 OutlinedTextField(s.token, { s = s.copy(token = it) }, label = { Text("Server API token (optional)") }, singleLine = true)
                 OutlinedTextField(s.apiKey, { s = s.copy(apiKey = it) }, label = { Text("astrometry.net key (optional)") }, singleLine = true)
                 OutlinedTextField(s.obscode, { s = s.copy(obscode = it) }, label = { Text("AAVSO observer code") }, singleLine = true)
+                OutlinedTextField(s.observer, { s = s.copy(observer = it) }, label = { Text("Observer name (VSNET)") }, singleLine = true)
+                OutlinedTextField(s.site, { s = s.copy(site = it) }, label = { Text("Observing site") },
+                    placeholder = { Text("Warsaw, Poland") }, singleLine = true)
+                OutlinedTextField(s.instrument, { s = s.copy(instrument = it) }, label = { Text("Instrument") },
+                    placeholder = { Text("Galaxy S25 Ultra, 23 mm, 25 s") }, singleLine = true)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(s.lat, { s = s.copy(lat = it) }, label = { Text("Latitude") }, singleLine = true, modifier = Modifier.weight(1f))
                     OutlinedTextField(s.lon, { s = s.copy(lon = it) }, label = { Text("Longitude") }, singleLine = true, modifier = Modifier.weight(1f))

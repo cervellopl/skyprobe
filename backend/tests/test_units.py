@@ -201,3 +201,83 @@ def test_load_linear_dng(tmp_path):
     assert any("Linear DNG" in x for x in obs.warnings)
     peak = np.unravel_index(np.argmax(obs.data), obs.data.shape)
     assert abs(peak[1] - 30) <= 1 and abs(peak[0] - 20) <= 1
+
+
+def test_vsnet_object_names():
+    from app.vsnet import vsnet_object
+
+    assert vsnet_object("SS Cyg") == "CYGSS"          # the documented example
+    assert vsnet_object("AG Dra") == "DRAAG"
+    assert vsnet_object("V1500 Cyg") == "CYGV1500"
+    # designations that are not GCVS-style keep their own form
+    assert vsnet_object("ASASSN-V J020011.01+083956.0") == "ASASSN-V_J020011.01+083956.0"
+
+
+def test_vsnet_date_and_lines():
+    from app.vsnet import observation_line, ut_date
+
+    assert ut_date(2451545.0) == "20000101.500"       # 2000 Jan 1.5 UT
+    jd = 2451545.0
+    measured = {"name": "SS Cyg", "mag": 11.83, "err": 0.02, "upper_limit": False}
+    assert observation_line(measured, jd, "V", "Xyz") == "CYGSS 20000101.500 11.83V Xyz"
+    limit = {"name": "SS Cyg", "mag": 14.2, "upper_limit": True}
+    assert observation_line(limit, jd, "TG", "Xyz").split()[2] == ">14.2G"
+    uncertain = {"name": "SS Cyg", "mag": 11.8, "err": 0.02, "blended": True, "upper_limit": False}
+    assert observation_line(uncertain, jd, "CV", "Xyz").split()[2] == "11.80C:"
+    assert observation_line({"name": "X Cyg", "mag": 5.0, "saturated": True}, jd, "V", "X") is None
+
+
+def test_vsnet_report_selects_and_blocks():
+    from app.vsnet import build_report
+
+    result = {
+        "time": {"jd_mid": 2451545.0, "utc_mid": "2000-01-01T12:00:00"},
+        "calibration": {"band": "TG", "n_comps": 40, "zero_point": 20.0, "rms": 0.03,
+                        "response_slope": 0.0, "catalog": "Gaia DR3 -> Johnson V"},
+        "variables": [
+            {"name": "SS Cyg", "mag": 11.8, "err": 0.02, "upper_limit": False},
+            {"name": "Gaia DR3 12345", "mag": 12.0, "err": 0.02, "upper_limit": False},   # survey id
+            {"name": "AG Dra", "mag": 13.0, "err": 0.5, "upper_limit": False},            # too noisy
+            {"name": "RR Lyr", "mag": 15.0, "upper_limit": True},                         # limit
+        ],
+    }
+    rep = build_report(result, observer="Xyz", site="Warsaw")
+    assert rep["to"].startswith("vsnet-obs@")
+    assert rep["n_observations"] == 1 and "CYGSS" in rep["body"]
+    assert rep["selection"]["dropped_survey_id"] == 1 and rep["selection"]["dropped_error"] == 1
+    assert not rep["blocked"]
+    assert "Xyz" in rep["body"] and "Warsaw" in rep["body"]
+
+    result["calibration"]["response_slope"] = 0.2       # tone-compressed phone raw
+    assert build_report(result, observer="Xyz")["blocked"]
+
+    result.pop("time")
+    with pytest.raises(ValueError):
+        build_report(result, observer="Xyz")
+
+
+def test_pdf_report_is_generated(tmp_path):
+    from app.report import build_pdf
+
+    result = {
+        "filename": "test.fits", "status": "done",
+        "file": {"width": 100, "height": 80, "format": "fits", "band": "CV"},
+        "time": {"jd_mid": 2451545.0, "utc_mid": "2000-01-01T12:00:00", "source": "fits"},
+        "solution": {"ra": 10.0, "dec": 20.0, "ra_hms": "00:40:00", "dec_dms": "+20:00:00",
+                     "pixel_scale": 2.4, "fov_w_deg": 0.5, "fov_h_deg": 0.4, "rotation_deg": 12.0,
+                     "parity": "normal", "gal_l": 1.0, "gal_b": 2.0, "solver": "test", "solve_seconds": 1.0},
+        "calibration": {"band": "CV", "catalog": "Gaia DR3", "n_comps": 30, "zero_point": 20.0, "rms": 0.02,
+                        "color_term": 0.01, "limit_mag_5sigma": 17.0, "aperture_px": 4.0},
+        "detections": {"count": 100, "fwhm_px": 3.0},
+        "variables": [{"name": "SS Cyg", "type": "UGSS", "mag": 11.8, "err": 0.02, "upper_limit": False,
+                       "max": 7.7, "min": 12.4, "min_is_amplitude": False, "period": None,
+                       "airmass": 1.2, "flags": []}],
+        "candidates": [{"status": "unidentified", "kind": "new_star", "label": "possible nova",
+                        "mag": 12.0, "snr": 100.0, "fwhm_px": 3.1, "ra": 10.1, "dec": 20.1}],
+        "minor_bodies": [{"name": "(1) Ceres", "class": "MB", "vmag": 8.0, "detected": True,
+                          "measured_mag": 8.1, "rate_ra_arcsec_h": 10.0, "rate_dec_arcsec_h": 5.0}],
+        "warnings": ["a warning"],
+    }
+    out = build_pdf(result, tmp_path, tmp_path / "r.pdf")
+    data = out.read_bytes()
+    assert data.startswith(b"%PDF") and len(data) > 2000

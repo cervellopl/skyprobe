@@ -140,6 +140,8 @@ Interactive docs (OpenAPI) at `/docs`. Set `API_TOKEN` to require `X-API-Key` on
 | `GET` | `/api/jobs/{id}/wcs.fits`, `/solution.wcs` | the astrometric solution |
 | `GET` | `/api/jobs/{id}/photometry.csv`, `/candidates.csv` | tables |
 | `GET` | `/api/jobs/{id}/aavso.txt` | AAVSO Extended Format report |
+| `GET` | `/api/jobs/{id}/report.pdf` | printable PDF report (image, astrometry, calibration, tables) |
+| `GET` | `/api/jobs/{id}/vsnet` | composed vsnet-obs posting (`?plain=true` for text) |
 
 ### `POST /api/jobs` form fields
 
@@ -169,10 +171,27 @@ Interactive docs (OpenAPI) at `/docs`. Set `API_TOKEN` to require `X-API-Key` on
 }
 ```
 
+### Reporting to VSNET
+
+`/api/jobs/{id}/vsnet` composes a posting for the
+[vsnet-obs](http://www.kusastro.kyoto-u.ac.jp/vsnet/) mailing list in the
+[documented format](http://www.kusastro.kyoto-u.ac.jp/vsnet/etc/format.html)
+(`CYGSS 20000101.345 11.83V Xyz` — constellation-first name, UT date, magnitude with a
+filter letter, `>` for a limit, a trailing colon for an uncertain value), wrapped in a
+configurable intro and footer (`VSNET_INTRO`, `VSNET_FOOTER`, `VSNET_ADDRESS`).
+
+It is deliberately **composed, not sent**: the list expects the message to come from the
+address the observer subscribed with, so the web UI and the app hand it to the mail client.
+Two guards keep the list usable: only named variables with small errors are included
+(auto-generated survey identifiers, flagged and too-noisy measurements are dropped, and the
+line count is capped — a wide phone frame yields ~2000 measurements), and a posting is
+marked *blocked* when the camera response was found to be non-linear.
+
 ## Configuration (environment)
 
 `DATA_DIR` · `WORKERS` (parallel jobs) · `MAX_UPLOAD_MB` · `KEEP_JOBS` · `API_TOKEN` ·
 `ASTROMETRY_API_KEY` · `ASTROMETRY_URL` · `SOLVER` · `SOLVE_FIELD` (binary path) ·
+`VSNET_ADDRESS` · `VSNET_INTRO` · `VSNET_FOOTER` ·
 `SOLVE_TIMEOUT` · `CATALOG_CACHE` · `VIZIER_SERVER` · `GAIA_MAX_RADIUS`.
 
 ## Tests

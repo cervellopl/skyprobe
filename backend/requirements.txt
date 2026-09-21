@@ -12,4 +12,5 @@ pillow>=10.2
 pillow-heif>=0.15      # HEIC/HEIF from iPhones and some Android phones
 rawpy>=0.19            # camera RAW (DNG, CR2/CR3, NEF, ARW, ORF, RW2 …)
 ExifRead>=3.0          # EXIF inside RAW files
+fpdf2>=2.7            # PDF reports
 requests>=2.31

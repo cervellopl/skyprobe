@@ -4,6 +4,8 @@ POST /api/jobs            upload an image (multipart), returns job id
 GET  /api/jobs            recent jobs
 GET  /api/jobs/{id}       status + full results (poll until status is done/failed)
 GET  /api/jobs/{id}/preview.jpg | annotated.jpg | wcs.fits | solution.wcs | aavso.txt | photometry.csv | candidates.csv
+GET  /api/jobs/{id}/report.pdf    printable PDF report
+GET  /api/jobs/{id}/vsnet         composed vsnet-obs posting (JSON, or text with ?plain=true)
 DELETE /api/jobs/{id}
 GET  /api/health          capabilities of this server
 """
@@ -27,7 +29,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import astrometry, pipeline
+from . import astrometry, pipeline, report as report_mod, vsnet
 from .imageio import DEVICE_PRESETS, FITS_EXT, JPEG_EXT, RAW_EXT
 
 VERSION = "1.0.0"
@@ -229,8 +231,42 @@ def delete_job(job_id: str):
     return {"deleted": job_id}
 
 
+@app.get("/api/jobs/{job_id}/report.pdf", dependencies=[Depends(auth)])
+def job_report(job_id: str, refresh: bool = False):
+    """A printable summary of the analysis; built on first request and then cached."""
+    r = _load(job_id)
+    if r.get("status") != "done":
+        raise HTTPException(409, "the analysis is not finished")
+    path = JOBS_DIR / job_id / "report.pdf"
+    if refresh or not path.exists():
+        report_mod.build_pdf(r, JOBS_DIR / job_id, path)
+    return FileResponse(path, media_type="application/pdf", filename=f"skyprobe_{job_id}.pdf")
+
+
+@app.get("/api/jobs/{job_id}/vsnet", dependencies=[Depends(auth)])
+def job_vsnet(job_id: str, observer: str = "", site: str = "", instrument: str = "",
+              limit: int = 50, named_only: bool = True, include_limits: bool = False,
+              max_error: float = 0.2, intro: str = "", footer: str = "", subject: str = "",
+              plain: bool = False):
+    """Composes a vsnet-obs posting. It is never sent from here: the list expects the
+    message to come from the observer's own (subscribed) address."""
+    r = _load(job_id)
+    if r.get("status") != "done":
+        raise HTTPException(409, "the analysis is not finished")
+    try:
+        rep = vsnet.build_report(r, observer=observer, site=site, instrument=instrument,
+                                 include_limits=include_limits, named_only=named_only,
+                                 max_error=max_error, limit=limit, intro=intro or None,
+                                 footer=footer or None, subject=subject or None, version=VERSION)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    if plain:
+        return PlainTextResponse(rep["body"])
+    return rep
+
+
 FILES = {"preview.jpg": "image/jpeg", "annotated.jpg": "image/jpeg", "wcs.fits": "application/fits",
-         "solution.wcs": "text/plain", "aavso.txt": "text/plain"}
+         "solution.wcs": "text/plain", "aavso.txt": "text/plain", "report.pdf": "application/pdf"}
 
 
 @app.get("/api/jobs/{job_id}/{name}", dependencies=[Depends(auth)])

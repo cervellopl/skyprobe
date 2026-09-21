@@ -130,6 +130,26 @@ data class JobSummary(
 )
 
 @Serializable
+data class VsnetSelection(
+    val total: Int = 0,
+    @SerialName("dropped_survey_id") val droppedSurveyId: Int = 0,
+    @SerialName("dropped_flagged") val droppedFlagged: Int = 0,
+    @SerialName("dropped_error") val droppedError: Int = 0,
+    @SerialName("dropped_limits") val droppedLimits: Int = 0,
+    val selected: Int = 0,
+    @SerialName("over_limit") val overLimit: Int = 0,
+)
+
+@Serializable
+data class VsnetReport(
+    val to: String = "", val subject: String = "", val body: String = "",
+    @SerialName("n_observations") val nObservations: Int = 0,
+    val blocked: Boolean = false,
+    @SerialName("blocked_reason") val blockedReason: String? = null,
+    val selection: VsnetSelection = VsnetSelection(),
+)
+
+@Serializable
 private data class CreateResponse(val id: String = "")
 
 // ---------------------------------------------------------------- client
@@ -170,6 +190,15 @@ class SkyProbeApi(baseUrl: String, private val token: String? = null) {
     suspend fun jobs(): List<JobSummary> = get("$base/api/jobs?limit=25") { json.decodeFromString(it) }
 
     suspend fun text(url: String): String = get(url) { it }
+
+    /** Composes (never sends) a vsnet-obs posting for this job. */
+    suspend fun vsnet(jobId: String, observer: String, site: String, instrument: String,
+                      includeLimits: Boolean = false, limit: Int = 50): VsnetReport {
+        fun enc(v: String) = java.net.URLEncoder.encode(v, "UTF-8")
+        val url = "$base/api/jobs/$jobId/vsnet?observer=${enc(observer)}&site=${enc(site)}" +
+            "&instrument=${enc(instrument)}&include_limits=$includeLimits&limit=$limit"
+        return get(url) { json.decodeFromString(it) }
+    }
 
     /** Uploads the picked image and returns the new job id. */
     suspend fun submit(

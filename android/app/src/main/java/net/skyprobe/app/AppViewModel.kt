@@ -27,6 +27,9 @@ data class Settings(
     val token: String = "",
     val apiKey: String = "",
     val obscode: String = "",
+    val observer: String = "",        // VSNET postings are signed with a name, not a code
+    val site: String = "",
+    val instrument: String = "",
     val device: String = "auto",
     val lat: String = "",
     val lon: String = "",
@@ -65,6 +68,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         token = prefs.getString("token", "") ?: "",
         apiKey = prefs.getString("apiKey", "") ?: "",
         obscode = prefs.getString("obscode", "") ?: "",
+        observer = prefs.getString("observer", "") ?: "",
+        site = prefs.getString("site", "") ?: "",
+        instrument = prefs.getString("instrument", "") ?: "",
         device = prefs.getString("device", "auto") ?: "auto",
         lat = prefs.getString("lat", "") ?: "",
         lon = prefs.getString("lon", "") ?: "",
@@ -77,6 +83,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         prefs.edit().apply {
             putString("server", s.server); putString("token", s.token); putString("apiKey", s.apiKey)
             putString("obscode", s.obscode); putString("device", s.device)
+            putString("observer", s.observer); putString("site", s.site); putString("instrument", s.instrument)
             putString("lat", s.lat); putString("lon", s.lon)
             putBoolean("photometry", s.photometry); putBoolean("transients", s.transients)
         }.apply()
@@ -200,4 +207,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     suspend fun aavsoReport(id: String): String = api.text(api.fileUrl(id, "aavso.txt"))
+
+    suspend fun vsnetReport(id: String, includeLimits: Boolean) = with(_state.value.settings) {
+        api.vsnet(id, observer, site, instrument, includeLimits)
+    }
 }
