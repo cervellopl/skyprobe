@@ -1,3 +1,3 @@
 # extra packages for the test suite
 pytest>=8.0
-tifffile>=2024.1   # writes the synthetic DNG files used by tests
+# tifffile (also a runtime dependency) writes the synthetic DNG files used by the tests
