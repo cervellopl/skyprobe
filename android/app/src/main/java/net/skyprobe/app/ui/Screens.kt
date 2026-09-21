@@ -4,10 +4,12 @@ import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -25,6 +27,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.UriHandler
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -192,39 +195,53 @@ private fun DevicePicker(state: UiState, vm: AppViewModel) {
 
 // ---------------------------------------------------------------- results
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ResultScreen(job: JobResult, vm: AppViewModel) {
     var tab by remember { mutableIntStateOf(0) }
+    var query by remember { mutableStateOf("") }
+    var imageTall by remember { mutableStateOf(false) }
+    val uri = LocalUriHandler.current
     val tabs = listOf("New objects (${job.unidentified})", "Variables (${job.variables.size})",
         "Minor bodies (${job.minorBodies.size})", "Details")
-    Column(Modifier.fillMaxSize()) {
-        AnnotatedImage(vm.api.fileUrl(job.id, "annotated.jpg"))
-        SummaryRow(job)
-        ScrollableTabRow(selectedTabIndex = tab, edgePadding = 8.dp) {
-            tabs.forEachIndexed { i, t ->
-                Tab(selected = tab == i, onClick = { tab = i }, text = { Text(t, maxLines = 1) })
+    val variables = job.variables.filter {
+        query.isBlank() || it.name.contains(query, true) || it.type.contains(query, true)
+    }
+
+    // One scrolling list for the whole screen: the preview and the summary scroll away
+    // instead of permanently occupying the space the data needs, and the tabs stay on top.
+    LazyColumn(Modifier.fillMaxSize()) {
+        item(key = "image") { AnnotatedImage(vm.api.fileUrl(job.id, "annotated.jpg"), imageTall) { imageTall = !imageTall } }
+        item(key = "summary") { SummaryRow(job) }
+        stickyHeader(key = "tabs") {
+            Surface(tonalElevation = 3.dp, shadowElevation = 3.dp) {
+                ScrollableTabRow(selectedTabIndex = tab, edgePadding = 8.dp) {
+                    tabs.forEachIndexed { i, t ->
+                        Tab(selected = tab == i, onClick = { tab = i }, text = { Text(t, maxLines = 1) })
+                    }
+                }
             }
         }
-        // weight(1f), not fillMaxSize(): inside a Column a child without a weight is given the
-        // whole parent height, so the list would run off the bottom of the screen and refuse to scroll
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            when (tab) {
-                0 -> CandidateList(job.candidates)
-                1 -> VariableList(job, vm)
-                2 -> MinorBodyList(job.minorBodies)
-                else -> DetailsPane(job)
+        when (tab) {
+            0 -> candidateItems(job.candidates, uri)
+            1 -> {
+                item(key = "vartools") { VariableToolbar(job, vm, query) { query = it } }
+                variableItems(variables, job.calibration?.band ?: "", uri)
             }
+            2 -> minorBodyItems(job.minorBodies, job.time != null)
+            else -> detailItems(job)
         }
+        item(key = "tail") { Spacer(Modifier.height(24.dp)) }
     }
 }
 
 @Composable
-private fun AnnotatedImage(url: String) {
+private fun AnnotatedImage(url: String, tall: Boolean, onToggleHeight: () -> Unit) {
     var scale by remember { mutableFloatStateOf(1f) }
     var ox by remember { mutableFloatStateOf(0f) }
     var oy by remember { mutableFloatStateOf(0f) }
     Box(
-        Modifier.fillMaxWidth().height(300.dp).background(Color.Black)
+        Modifier.fillMaxWidth().height(if (tall) 460.dp else 200.dp).background(Color.Black)
             .pointerInput(Unit) {
                 detectTransformGestures { _, pan, zoom, _ ->
                     scale = (scale * zoom).coerceIn(1f, 12f)
@@ -237,8 +254,11 @@ private fun AnnotatedImage(url: String) {
             model = url, contentDescription = "Annotated image",
             modifier = Modifier.fillMaxSize().graphicsLayer(scaleX = scale, scaleY = scale, translationX = ox, translationY = oy),
         )
-        if (abs(scale - 1f) > 0.01f) {
-            TextButton(onClick = { scale = 1f; ox = 0f; oy = 0f }, modifier = Modifier.align(Alignment.TopEnd)) { Text("Reset") }
+        Row(Modifier.align(Alignment.TopEnd)) {
+            if (abs(scale - 1f) > 0.01f) {
+                TextButton(onClick = { scale = 1f; ox = 0f; oy = 0f }) { Text("Reset") }
+            }
+            TextButton(onClick = onToggleHeight) { Text(if (tall) "Smaller" else "Bigger") }
         }
     }
 }
@@ -262,47 +282,44 @@ private fun SummaryRow(job: JobResult) {
             },
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        // only a taste here - the full list is in the Details tab, so the summary cannot
-        // grow until it squeezes the data out of the screen
-        job.warnings.take(2).forEach {
-            Text("⚠ $it", style = MaterialTheme.typography.bodySmall, color = Warn,
-                maxLines = 2, overflow = TextOverflow.Ellipsis)
+        // one line each: the full text lives in the Details tab
+        if (job.warnings.isNotEmpty()) {
+            Text("⚠ ${job.warnings.first()}", style = MaterialTheme.typography.bodySmall, color = Warn,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        if (job.warnings.size > 2) {
-            Text("⚠ +${job.warnings.size - 2} more (see Details)",
+        if (job.warnings.size > 1) {
+            Text("⚠ +${job.warnings.size - 1} more (see Details)",
                 style = MaterialTheme.typography.bodySmall, color = Warn)
         }
     }
 }
 
-@Composable
-private fun CandidateList(items: List<Candidate>) {
-    val uri = LocalUriHandler.current
+private val CARD = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+
+private fun LazyListScope.candidateItems(items: List<Candidate>, uri: UriHandler) {
     if (items.isEmpty()) {
-        Empty("Nothing unexpected above the catalogue limit.")
+        item { Empty("Nothing unexpected above the catalogue limit.") }
         return
     }
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(items) { c ->
-            ElevatedCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Badge(if (c.status == "unidentified") "NEW?" else "KNOWN",
-                            if (c.status == "unidentified") Danger else Warn)
-                        Spacer(Modifier.width(8.dp))
-                        Text("mag ${f(c.mag)}", fontWeight = FontWeight.SemiBold)
-                    }
-                    Text(c.label, style = MaterialTheme.typography.bodyMedium)
-                    Text("RA ${f(c.ra, 5)}°  Dec ${f(c.dec, 5)}°  ·  SNR ${f(c.snr, 0)}  ·  FWHM ${f(c.fwhmPx, 1)} px",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Row {
-                        TextButton(onClick = {
-                            uri.openUri("https://aladin.cds.unistra.fr/AladinLite/?target=${f(c.ra, 5)}%20${f(c.dec, 5)}&fov=0.25&survey=P%2FDSS2%2Fcolor")
-                        }) { Text("Aladin") }
-                        TextButton(onClick = {
-                            uri.openUri("https://www.wis-tns.org/search?ra=${f(c.ra, 5)}&decl=${f(c.dec, 5)}&radius=30&coords_unit=arcsec")
-                        }) { Text("TNS") }
-                    }
+    items(items, key = { "c" + it.ra + it.dec }) { c ->
+        ElevatedCard(CARD) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Badge(if (c.status == "unidentified") "NEW?" else "KNOWN",
+                        if (c.status == "unidentified") Danger else Warn)
+                    Spacer(Modifier.width(8.dp))
+                    Text("mag ${f(c.mag)}", fontWeight = FontWeight.SemiBold)
+                }
+                Text(c.label, style = MaterialTheme.typography.bodyMedium)
+                Text("RA ${f(c.ra, 5)}°  Dec ${f(c.dec, 5)}°  ·  SNR ${f(c.snr, 0)}  ·  FWHM ${f(c.fwhmPx, 1)} px",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row {
+                    TextButton(onClick = {
+                        uri.openUri("https://aladin.cds.unistra.fr/AladinLite/?target=${f(c.ra, 5)}%20${f(c.dec, 5)}&fov=0.25&survey=P%2FDSS2%2Fcolor")
+                    }) { Text("Aladin") }
+                    TextButton(onClick = {
+                        uri.openUri("https://www.wis-tns.org/search?ra=${f(c.ra, 5)}&decl=${f(c.dec, 5)}&radius=30&coords_unit=arcsec")
+                    }) { Text("TNS") }
                 }
             }
         }
@@ -310,43 +327,40 @@ private fun CandidateList(items: List<Candidate>) {
 }
 
 @Composable
-private fun VariableList(job: JobResult, vm: AppViewModel) {
+private fun VariableToolbar(job: JobResult, vm: AppViewModel, query: String, onQuery: (String) -> Unit) {
     val ctx = LocalContext.current
-    val uri = LocalUriHandler.current
     val scope = rememberCoroutineScope()
-    var query by remember { mutableStateOf("") }
-    val items = job.variables.filter {
-        query.isBlank() || it.name.contains(query, true) || it.type.contains(query, true)
-    }
-    Column(Modifier.fillMaxSize()) {
-        Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(query, { query = it }, label = { Text("Filter") }, singleLine = true, modifier = Modifier.weight(1f))
-            Spacer(Modifier.width(8.dp))
-            if (job.time != null) {
-                TextButton(onClick = {
-                    scope.launch {
-                        runCatching { vm.aavsoReport(job.id) }.onSuccess { text ->
-                            val send = Intent(Intent.ACTION_SEND).apply {
-                                type = "text/plain"
-                                putExtra(Intent.EXTRA_SUBJECT, "AAVSO report ${job.filename}")
-                                putExtra(Intent.EXTRA_TEXT, text)
-                            }
-                            ctx.startActivity(Intent.createChooser(send, "Share AAVSO report"))
+    Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        OutlinedTextField(query, onQuery, label = { Text("Filter") }, singleLine = true, modifier = Modifier.weight(1f))
+        Spacer(Modifier.width(8.dp))
+        if (job.time != null) {
+            TextButton(onClick = {
+                scope.launch {
+                    runCatching { vm.aavsoReport(job.id) }.onSuccess { text ->
+                        val send = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_SUBJECT, "AAVSO report ${job.filename}")
+                            putExtra(Intent.EXTRA_TEXT, text)
                         }
+                        ctx.startActivity(Intent.createChooser(send, "Share AAVSO report"))
                     }
-                }) { Text("AAVSO") }
-            }
+                }
+            }) { Text("AAVSO") }
         }
-        if (items.isEmpty()) Empty("No catalogued variables measured.") else
-            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(items) { v -> VariableCard(v, job.calibration?.band ?: "") { uri.openUri(v.vsxUrl) } }
-            }
     }
+}
+
+private fun LazyListScope.variableItems(items: List<Variable>, band: String, uri: UriHandler) {
+    if (items.isEmpty()) {
+        item { Empty("No catalogued variables measured.") }
+        return
+    }
+    items(items, key = { "v" + it.oid + it.ra }) { v -> VariableCard(v, band) { uri.openUri(v.vsxUrl) } }
 }
 
 @Composable
 private fun VariableCard(v: Variable, band: String, onOpen: () -> Unit) {
-    ElevatedCard(Modifier.fillMaxWidth()) {
+    ElevatedCard(CARD) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(v.name, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -380,60 +394,66 @@ private fun VariableCard(v: Variable, band: String, onOpen: () -> Unit) {
     }
 }
 
-@Composable
-private fun MinorBodyList(items: List<MinorBody>) {
+private fun LazyListScope.minorBodyItems(items: List<MinorBody>, haveTime: Boolean) {
     if (items.isEmpty()) {
-        Empty("No known asteroids or comets brighter than the image limit (needs the observation time).")
+        item {
+            Empty(if (haveTime) "No known asteroids or comets brighter than the image limit."
+                  else "Needs the observation time of the image.")
+        }
         return
     }
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(items) { m ->
-            ElevatedCard(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(12.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(m.name, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                        if (m.detected) Badge("DETECTED ${f(m.measuredMag, 1)}", Amber) else Badge("NOT SEEN", Color.Gray)
-                    }
-                    Text("${m.cls}  ·  predicted V ${f(m.vmag, 1)}  ·  motion ${f(kotlin.math.hypot(m.rateRa, m.rateDec), 1)}″/h",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    items(items, key = { "m" + it.name }) { m ->
+        ElevatedCard(CARD) {
+            Column(Modifier.padding(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(m.name, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    if (m.detected) Badge("DETECTED ${f(m.measuredMag, 1)}", Amber) else Badge("NOT SEEN", Color.Gray)
                 }
+                Text("${m.cls}  ·  predicted V ${f(m.vmag, 1)}  ·  motion ${f(kotlin.math.hypot(m.rateRa, m.rateDec), 1)}″/h",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
 }
 
-@Composable
-private fun DetailsPane(job: JobResult) {
-    val s = job.solution
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        s?.let {
-            Row2("Centre", "${it.raHms} ${it.decDms}")
-            Row2("RA / Dec", "${f(it.ra, 5)}° / ${f(it.dec, 5)}°")
-            Row2("Pixel scale", "${f(it.pixelScale, 3)}″/px")
-            Row2("Rotation", "${f(it.rotation, 1)}° (${it.parity})")
-            Row2("Galactic", "l ${f(it.galL, 2)}°, b ${f(it.galB, 2)}°")
-            Row2("Solver", "${it.solver} (${f(it.solveSeconds, 1)} s)")
+private fun LazyListScope.detailItems(job: JobResult) {
+    item {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            job.solution?.let {
+                Row2("Centre", "${it.raHms} ${it.decDms}")
+                Row2("RA / Dec", "${f(it.ra, 5)}° / ${f(it.dec, 5)}°")
+                Row2("Pixel scale", "${f(it.pixelScale, 3)}″/px")
+                Row2("Rotation", "${f(it.rotation, 1)}° (${it.parity})")
+                Row2("Galactic", "l ${f(it.galL, 2)}°, b ${f(it.galB, 2)}°")
+                Row2("Solver", "${it.solver} (${f(it.solveSeconds, 1)} s)")
+            }
+            job.detections?.let { Row2("Stars / FWHM", "${it.count} / ${f(it.fwhmPx, 1)} px (${f(it.fwhmArcsec, 1)}″)") }
+            job.calibration?.let {
+                Row2("Band / catalogue", "${it.band} · ${it.catalog}")
+                Row2("Comparison stars", it.nComps.toString())
+                Row2("Zero point", "${f(it.zeroPoint, 3)} ± ${f(it.rms, 3)}")
+                Row2("Colour term", f(it.colorTerm, 3))
+                Row2("Limiting mag (5σ)", f(it.limitMag, 1))
+            }
+            job.time?.let { Row2("Time (UTC)", "${it.utcMid}  (${it.source})") }
         }
-        job.detections?.let { Row2("Stars / FWHM", "${it.count} / ${f(it.fwhmPx, 1)} px (${f(it.fwhmArcsec, 1)}″)") }
-        job.calibration?.let {
-            Row2("Band / catalogue", "${it.band} · ${it.catalog}")
-            Row2("Comparison stars", it.nComps.toString())
-            Row2("Zero point", "${f(it.zeroPoint, 3)} ± ${f(it.rms, 3)}")
-            Row2("Colour term", f(it.colorTerm, 3))
-            Row2("Limiting mag (5σ)", f(it.limitMag, 1))
-        }
-        job.time?.let { Row2("Time (UTC)", "${it.utcMid}  (${it.source})") }
-        if (job.warnings.isNotEmpty()) {
-            Spacer(Modifier.height(8.dp))
-            Text("Warnings", fontWeight = FontWeight.SemiBold)
-            job.warnings.forEach {
-                Text("⚠ $it", style = MaterialTheme.typography.bodySmall, color = Warn)
+    }
+    if (job.warnings.isNotEmpty()) {
+        item {
+            Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Warnings", fontWeight = FontWeight.SemiBold)
+                job.warnings.forEach {
+                    Text("⚠ $it", style = MaterialTheme.typography.bodySmall, color = Warn)
+                }
             }
         }
-        Spacer(Modifier.height(8.dp))
-        Text("Log", fontWeight = FontWeight.SemiBold)
-        Text(job.log.joinToString("\n"), fontFamily = FontFamily.Monospace,
-            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+    item {
+        Column(Modifier.padding(16.dp)) {
+            Text("Log", fontWeight = FontWeight.SemiBold)
+            Text(job.log.joinToString("\n"), fontFamily = FontFamily.Monospace,
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 
