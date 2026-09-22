@@ -238,8 +238,19 @@ def _exif_from_exifread(path: Path) -> dict:
     return out
 
 
+def _as_int(v):
+    """EXIF hands ISO over as an int, a string or a one-element list depending on the reader."""
+    if isinstance(v, (list, tuple)):
+        v = v[0] if v else None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _finish_exif(meta: dict, exif: dict, width: int, height: int, warn: list):
     t, src = _parse_exif_datetime(exif.pop("_dt", None), exif.pop("_offset", None), exif.pop("_subsec", None))
+    exif["iso"] = _as_int(exif.get("iso"))
     meta.update({k: v for k, v in exif.items() if v not in (None, "")})
     if t is not None:
         meta["date_obs"] = t.isoformat()

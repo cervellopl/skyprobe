@@ -326,6 +326,10 @@ function showSelected(key) {
   const url = `/api/jobs/${job.id}/cutout.jpg?x=${o.x.toFixed(1)}&y=${o.y.toFixed(1)}` +
     `&size=90&zoom=4&source=${cutoutSource}&brightness=${display.brightness}&contrast=${display.contrast}`;
   const title = key[0] === "v" ? o.name : key[0] === "m" ? o.name : o.label;
+  const m = job.meta || {};
+  const shot = [m.exptime != null ? `${fmt(m.exptime, m.exptime < 10 ? 2 : 1)} s` : null,
+                m.iso != null ? `ISO ${m.iso}` : null,
+                job.calibration?.band].filter(Boolean).join("  ·  ");
   const facts = key[0] === "v"
     ? [["Type", o.type], ["Magnitude", (o.upper_limit ? "fainter than " : "") + fmt(o.mag, 3)],
        ["Error", fmt(o.err, 3)], ["VSX range", o.max == null ? "–" : `${fmt(o.max, 2)}–${fmt(o.min, 2)}`],
@@ -340,6 +344,7 @@ function showSelected(key) {
       <button class="ghost small" id="selClose">×</button></div>
     <img src="${url}" alt="close-up of ${esc(title)}">
     <div class="facts"><div><span>Object</span><span>${esc(title)}</span></div>
+      ${shot ? `<div><span>Exposure</span><span>${esc(shot)}</span></div>` : ""}
       ${facts.map(([k, v]) => `<div><span>${esc(k)}</span><span>${esc(v ?? "–")}</span></div>`).join("")}</div>
     <label class="check small" style="margin-top:8px"><input type="checkbox" id="selFull"
       ${cutoutSource === "original" ? "checked" : ""}> full resolution

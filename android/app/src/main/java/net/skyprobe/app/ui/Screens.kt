@@ -232,7 +232,7 @@ private fun ResultScreen(job: JobResult, vm: AppViewModel) {
     var candSort by remember { mutableStateOf(CandSort.BRIGHT) }
     var newOnly by remember { mutableStateOf(false) }
     val uri = LocalUriHandler.current
-    val thumbs = Thumbs(vm, job.id, brightness, contrast)
+    val thumbs = Thumbs(vm, job.id, brightness, contrast, exposureLine(job))
 
     val variables = remember(job, query, varSort, measuredOnly, unflaggedOnly) {
         job.variables
@@ -526,7 +526,8 @@ private fun DisplayRow(brightness: Float, contrast: Float, onBrightness: (Float)
 }
 
 /** Builds close-up URLs that follow the current brightness and contrast. */
-private class Thumbs(val vm: AppViewModel, val jobId: String, val brightness: Float, val contrast: Float) {
+private class Thumbs(val vm: AppViewModel, val jobId: String, val brightness: Float, val contrast: Float,
+                     val exposure: String = "") {
     fun url(x: Double, y: Double, size: Int = 90, zoom: Int = 4, original: Boolean = false) =
         vm.api.fileUrl(jobId, "cutout.jpg") +
             "?x=$x&y=$y&size=$size&zoom=$zoom&brightness=$brightness&contrast=$contrast" +
@@ -537,6 +538,13 @@ private class Thumbs(val vm: AppViewModel, val jobId: String, val brightness: Fl
  * The close-up, with a switch to the original resolution. The preview is instant; the
  * original costs one decode of the raw file on the server, which is then cached.
  */
+/** "24.6 s · ISO 500 · TG" - the conditions the close-up was taken under. */
+private fun exposureLine(job: JobResult): String = listOfNotNull(
+    job.meta?.exptime?.let { if (it < 10) "${f(it, 2)} s" else "${f(it, 1)} s" },
+    job.meta?.iso?.let { "ISO $it" },
+    job.calibration?.band?.takeIf { it.isNotBlank() },
+).joinToString("  ·  ")
+
 @Composable
 private fun Thumb(thumbs: Thumbs, x: Double, y: Double, label: String) {
     var original by remember { mutableStateOf(false) }
@@ -550,6 +558,11 @@ private fun Thumb(thumbs: Thumbs, x: Double, y: Double, label: String) {
             Text(if (original) "full resolution" else "preview (tap for full resolution)",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (thumbs.exposure.isNotBlank()) {
+                Spacer(Modifier.weight(1f))
+                Text(thumbs.exposure, style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
     }
 }

@@ -102,6 +102,13 @@ data class ObsTime(@SerialName("utc_mid") val utcMid: String = "", @SerialName("
 data class FileInfo(val name: String = "", val format: String = "", val width: Int = 0, val height: Int = 0, val band: String = "")
 
 @Serializable
+data class Meta(
+    val exptime: Double? = null, val iso: Int? = null,
+    val make: String? = null, val model: String? = null,
+    @SerialName("focal35_mm") val focal35: Double? = null,
+)
+
+@Serializable
 data class Detections(val count: Int = 0, @SerialName("fwhm_px") val fwhmPx: Double? = null, @SerialName("fwhm_arcsec") val fwhmArcsec: Double? = null)
 
 @Serializable
@@ -109,7 +116,7 @@ data class JobResult(
     val id: String = "", val status: String = "", val stage: String = "", val progress: Int = 0,
     val filename: String = "", val error: String? = null, val log: List<String> = emptyList(),
     val warnings: List<String> = emptyList(),
-    val file: FileInfo? = null, val time: ObsTime? = null,
+    val file: FileInfo? = null, val time: ObsTime? = null, val meta: Meta? = null,
     val detections: Detections? = null,
     val solution: Solution? = null, val calibration: Calibration? = null,
     val variables: List<Variable> = emptyList(),
