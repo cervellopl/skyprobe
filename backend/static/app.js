@@ -9,6 +9,7 @@ const store = {
 const COLORS = { unidentified: "#ff5a5f", known: "#ffd23f", variable: "#5cd0ff", limit: "#8b97b0", minor: "#ffa94d", minorMiss: "#9c7a55" };
 let job = null, pollTimer = null, view = { z: 1, x: 0, y: 0 }, selected = null;
 let display = { brightness: Number(store.get("sp_bright")) || 1, contrast: Number(store.get("sp_contrast")) || 1 };
+let cutoutSource = store.get("sp_cutsrc") || "preview";
 
 // ---------------------------------------------------------------- server status
 fetch("/api/health").then((r) => r.json()).then((h) => {
@@ -323,7 +324,7 @@ function showSelected(key) {
   const o = lookup(key), card = $("#selectedCard");
   if (!o) { card.classList.add("hidden"); return; }
   const url = `/api/jobs/${job.id}/cutout.jpg?x=${o.x.toFixed(1)}&y=${o.y.toFixed(1)}` +
-    `&size=90&zoom=4&brightness=${display.brightness}&contrast=${display.contrast}`;
+    `&size=90&zoom=4&source=${cutoutSource}&brightness=${display.brightness}&contrast=${display.contrast}`;
   const title = key[0] === "v" ? o.name : key[0] === "m" ? o.name : o.label;
   const facts = key[0] === "v"
     ? [["Type", o.type], ["Magnitude", (o.upper_limit ? "fainter than " : "") + fmt(o.mag, 3)],
@@ -340,9 +341,17 @@ function showSelected(key) {
     <img src="${url}" alt="close-up of ${esc(title)}">
     <div class="facts"><div><span>Object</span><span>${esc(title)}</span></div>
       ${facts.map(([k, v]) => `<div><span>${esc(k)}</span><span>${esc(v ?? "–")}</span></div>`).join("")}</div>
+    <label class="check small" style="margin-top:8px"><input type="checkbox" id="selFull"
+      ${cutoutSource === "original" ? "checked" : ""}> full resolution
+      <span class="muted">(first one decodes the original)</span></label>
     <div class="links"><a class="btn small" target="_blank" rel="noopener" href="${aladin(o.ra, o.dec)}">Aladin</a>
       ${key[0] === "v" ? `<a class="btn small" target="_blank" rel="noopener" href="${esc(o.vsx_url)}">VSX</a>` : ""}</div>`;
   $("#selClose").onclick = () => { selected = null; card.classList.add("hidden"); drawOverlay(); };
+  $("#selFull").onchange = (e) => {
+    cutoutSource = e.target.checked ? "original" : "preview";
+    store.set("sp_cutsrc", cutoutSource);
+    showSelected(key);
+  };
 }
 
 function select(key) {

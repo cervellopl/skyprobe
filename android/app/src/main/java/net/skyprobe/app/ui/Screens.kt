@@ -527,17 +527,31 @@ private fun DisplayRow(brightness: Float, contrast: Float, onBrightness: (Float)
 
 /** Builds close-up URLs that follow the current brightness and contrast. */
 private class Thumbs(val vm: AppViewModel, val jobId: String, val brightness: Float, val contrast: Float) {
-    fun url(x: Double, y: Double, size: Int = 90, zoom: Int = 4) =
+    fun url(x: Double, y: Double, size: Int = 90, zoom: Int = 4, original: Boolean = false) =
         vm.api.fileUrl(jobId, "cutout.jpg") +
-            "?x=$x&y=$y&size=$size&zoom=$zoom&brightness=$brightness&contrast=$contrast"
+            "?x=$x&y=$y&size=$size&zoom=$zoom&brightness=$brightness&contrast=$contrast" +
+            (if (original) "&source=original" else "")
 }
 
+/**
+ * The close-up, with a switch to the original resolution. The preview is instant; the
+ * original costs one decode of the raw file on the server, which is then cached.
+ */
 @Composable
-private fun Thumb(url: String, label: String) {
-    AsyncImage(
-        model = url, contentDescription = "Close-up of $label",
-        modifier = Modifier.fillMaxWidth().height(180.dp).clip(RoundedCornerShape(8.dp)).background(Color.Black),
-    )
+private fun Thumb(thumbs: Thumbs, x: Double, y: Double, label: String) {
+    var original by remember { mutableStateOf(false) }
+    Column {
+        AsyncImage(
+            model = thumbs.url(x, y, original = original), contentDescription = "Close-up of $label",
+            modifier = Modifier.fillMaxWidth().height(180.dp).clip(RoundedCornerShape(8.dp)).background(Color.Black),
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(original, { original = it })
+            Text(if (original) "full resolution" else "preview (tap for full resolution)",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
 }
 
 @Composable
@@ -612,7 +626,7 @@ private fun LazyListScope.candidateItems(items: List<Candidate>, uri: UriHandler
         var open by remember { mutableStateOf(false) }
         ElevatedCard(CARD.clickable { open = !open }) {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (open) Thumb(thumbs.url(c.x, c.y), c.label)
+                if (open) Thumb(thumbs, c.x, c.y, c.label)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Badge(if (c.status == "unidentified") "NEW?" else "KNOWN",
                         if (c.status == "unidentified") Danger else Warn)
@@ -672,7 +686,7 @@ private fun VariableCard(v: Variable, band: String, thumbs: Thumbs, onOpen: () -
     var open by remember { mutableStateOf(false) }
     ElevatedCard(CARD.clickable { open = !open }) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            if (open) Thumb(thumbs.url(v.x, v.y), v.name)
+            if (open) Thumb(thumbs, v.x, v.y, v.name)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(v.name, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
@@ -717,7 +731,7 @@ private fun LazyListScope.minorBodyItems(items: List<MinorBody>, haveTime: Boole
         var open by remember { mutableStateOf(false) }
         ElevatedCard(CARD.clickable { open = !open }) {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (open) Thumb(thumbs.url(m.x, m.y), m.name)
+                if (open) Thumb(thumbs, m.x, m.y, m.name)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(m.name, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                     if (m.detected) Badge("DETECTED ${f(m.measuredMag, 1)}", Amber) else Badge("NOT SEEN", Color.Gray)

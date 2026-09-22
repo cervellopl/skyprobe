@@ -4,7 +4,7 @@ POST /api/jobs            upload an image (multipart), returns job id
 GET  /api/jobs            recent jobs
 GET  /api/jobs/{id}       status + full results (poll until status is done/failed)
 GET  /api/jobs/{id}/preview.jpg | annotated.jpg | wcs.fits | solution.wcs | aavso.txt | photometry.csv | candidates.csv
-GET  /api/jobs/{id}/cutout.jpg?x=&y=  close-up of one object
+GET  /api/jobs/{id}/cutout.jpg?x=&y=[&source=original]  close-up of one object
 GET  /api/jobs/{id}/report.pdf    printable PDF report
 GET  /api/jobs/{id}/vsnet         composed vsnet-obs posting (JSON, or text with ?plain=true)
 DELETE /api/jobs/{id}
@@ -285,35 +285,73 @@ def job_vsnet(job_id: str, observer: str = "", site: str = "", instrument: str =
     return rep
 
 
+_fullres_locks: dict[str, threading.Lock] = {}
+
+
+def _fullres(job_id: str) -> Path:
+    """A stretched full-resolution rendering of the original, made once and kept.
+
+    Decoding a 17 MB DNG takes seconds, which is fine once but not per click, so the
+    result is cached next to the job. It is a display rendering, not measurement data.
+    """
+    path = JOBS_DIR / job_id / "fullres.jpg"
+    if path.exists():
+        return path
+    lock = _fullres_locks.setdefault(job_id, threading.Lock())
+    with lock:
+        if path.exists():           # somebody else rendered it while we waited
+            return path
+        source = next((p for p in (JOBS_DIR / job_id).glob("input.*")), None)
+        if source is None:
+            raise HTTPException(404, "the original image is no longer on the server")
+        from PIL import Image
+
+        from .imageio import auto_stretch, load_image
+
+        img = load_image(source)
+        Image.fromarray(auto_stretch(img.data)).save(path, "JPEG", quality=92)
+    return path
+
+
 @app.get("/api/jobs/{job_id}/cutout.jpg", dependencies=[Depends(auth)])
 def job_cutout(job_id: str, x: float, y: float, size: int = 80, zoom: int = 4, mark: bool = True,
-               brightness: float = 1.0, contrast: float = 1.0):
-    """A close-up of one object, cut from the preview around a full-resolution pixel position.
+               brightness: float = 1.0, contrast: float = 1.0, source: str = "preview"):
+    """A close-up of one object around a full-resolution pixel position.
 
-    Cut from the preview rather than the original: the original may be a 50 MB raw file, and
-    for judging whether something looks like a star the stretched preview is what you want.
+    source=preview (default) cuts from the stretched preview - immediate, and enough to tell
+    a star from an artefact. source=original cuts from the original at full resolution, which
+    costs one decode of the raw file the first time and is then cached.
     """
     from PIL import Image, ImageDraw, ImageEnhance
 
     r = _load(job_id)
-    path = JOBS_DIR / job_id / "preview.jpg"
+    if source == "original":
+        path = _fullres(job_id)
+        scale = 1.0
+    elif source == "preview":
+        path = JOBS_DIR / job_id / "preview.jpg"
+        scale = float((r.get("preview") or {}).get("scale") or 1.0)
+    else:
+        raise HTTPException(400, "source must be 'preview' or 'original'")
     if not path.exists():
-        raise HTTPException(404, "no preview for this job")
-    scale = float((r.get("preview") or {}).get("scale") or 1.0)
-    size = max(16, min(size, 400))
+        raise HTTPException(404, "no image to cut from")
+    size = max(16, min(size, 1200))
     zoom = max(1, min(zoom, 12))
 
     with Image.open(path) as im:
         im = im.convert("RGB")
+        # size is always in original pixels, so the two sources frame the same piece of sky
         cx, cy = x * scale, y * scale
-        half = size / 2
+        half = max(size * scale / 2, 6)
         box = (int(round(cx - half)), int(round(cy - half)), int(round(cx + half)), int(round(cy + half)))
         crop = im.crop(box)          # PIL pads out-of-bounds areas with black
     if abs(brightness - 1.0) > 0.01:
         crop = ImageEnhance.Brightness(crop).enhance(brightness)
     if abs(contrast - 1.0) > 0.01:
         crop = ImageEnhance.Contrast(crop).enhance(contrast)
-    crop = crop.resize((crop.width * zoom, crop.height * zoom), Image.LANCZOS)
+    # zoom is output pixels per *original* pixel, so both sources render at the same size
+    target = max(32, min(int(round(size * zoom)), 1600))
+    crop = crop.resize((target, target), Image.LANCZOS)
     if mark:
         d = ImageDraw.Draw(crop)
         c, radius, gap = crop.width / 2, crop.width / 6, crop.width / 14

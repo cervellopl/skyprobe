@@ -140,7 +140,7 @@ Interactive docs (OpenAPI) at `/docs`. Set `API_TOKEN` to require `X-API-Key` on
 | `GET` | `/api/jobs/{id}/wcs.fits`, `/solution.wcs` | the astrometric solution |
 | `GET` | `/api/jobs/{id}/photometry.csv`, `/candidates.csv` | tables |
 | `GET` | `/api/jobs/{id}/aavso.txt` | AAVSO Extended Format report |
-| `GET` | `/api/jobs/{id}/cutout.jpg?x=&y=` | close-up of one object, cut from the preview |
+| `GET` | `/api/jobs/{id}/cutout.jpg?x=&y=` | close-up of one object (`&source=original` for full resolution) |
 | `GET` | `/api/jobs/{id}/report.pdf` | printable PDF report (image, astrometry, calibration, tables) |
 | `GET` | `/api/jobs/{id}/vsnet` | composed vsnet-obs posting (`?plain=true` for text) |
 
