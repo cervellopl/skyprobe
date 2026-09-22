@@ -104,3 +104,10 @@ dialog textarea { width: 100%; background: var(--panel2); color: var(--text); bo
 #dbPlot .pt.limit { fill: none; stroke: var(--muted); }
 #dbPlot .bar { stroke: var(--cyan); stroke-width: 1; opacity: .6; }
 #dbPlot .label { fill: var(--muted); font-size: 11px; }
+
+.slider { flex-direction: row; align-items: center; gap: 6px; color: var(--muted); }
+.slider input[type=range] { width: 92px; accent-color: var(--accent); padding: 0; }
+#selectedCard img { width: 100%; border-radius: 8px; display: block; background: #000; image-rendering: auto; }
+#selectedCard .facts { font-size: 13px; margin-top: 8px; }
+#selectedCard .facts div { display: flex; justify-content: space-between; gap: 10px; padding: 2px 0; }
+#selectedCard .facts span:first-child { color: var(--muted); }

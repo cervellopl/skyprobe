@@ -28,6 +28,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -218,6 +220,8 @@ private fun ResultScreen(job: JobResult, vm: AppViewModel) {
     var tab by remember { mutableIntStateOf(0) }
     var imageTall by remember { mutableStateOf(false) }
     var showVsnet by remember { mutableStateOf(false) }
+    var brightness by remember { mutableFloatStateOf(1f) }
+    var contrast by remember { mutableFloatStateOf(1f) }
     // kept across tab switches, so going back to a list finds it as it was left
     var query by remember { mutableStateOf("") }
     var varSort by remember { mutableStateOf(VarSort.BRIGHT) }
@@ -228,6 +232,7 @@ private fun ResultScreen(job: JobResult, vm: AppViewModel) {
     var candSort by remember { mutableStateOf(CandSort.BRIGHT) }
     var newOnly by remember { mutableStateOf(false) }
     val uri = LocalUriHandler.current
+    val thumbs = Thumbs(vm, job.id, brightness, contrast)
 
     val variables = remember(job, query, varSort, measuredOnly, unflaggedOnly) {
         job.variables
@@ -270,7 +275,16 @@ private fun ResultScreen(job: JobResult, vm: AppViewModel) {
     // One scrolling list for the whole screen: the preview and the summary scroll away
     // instead of permanently occupying the space the data needs, and the tabs stay on top.
     LazyColumn(Modifier.fillMaxSize()) {
-        item(key = "image") { AnnotatedImage(vm.api.fileUrl(job.id, "annotated.jpg"), imageTall) { imageTall = !imageTall } }
+        item(key = "image") {
+            AnnotatedImage(vm.api.fileUrl(job.id, "annotated.jpg"), imageTall, brightness, contrast) {
+                imageTall = !imageTall
+            }
+        }
+        item(key = "display") {
+            DisplayRow(brightness, contrast, { brightness = it }, { contrast = it }) {
+                brightness = 1f; contrast = 1f
+            }
+        }
         item(key = "summary") { SummaryRow(job) }
         item(key = "actions") { ResultActions(job, vm) { showVsnet = true } }
         stickyHeader(key = "tabs") {
@@ -292,7 +306,7 @@ private fun ResultScreen(job: JobResult, vm: AppViewModel) {
                         shown = candidates.size, total = job.candidates.size,
                     )
                 }
-                candidateItems(candidates, uri)
+                candidateItems(candidates, uri, thumbs)
             }
             1 -> {
                 item(key = "vartools") { VariableToolbar(job, vm, query) { query = it } }
@@ -307,7 +321,7 @@ private fun ResultScreen(job: JobResult, vm: AppViewModel) {
                         shown = variables.size, total = job.variables.size,
                     )
                 }
-                variableItems(variables, job.calibration?.band ?: "", uri)
+                variableItems(variables, job.calibration?.band ?: "", uri, thumbs)
             }
             2 -> {
                 if (job.minorBodies.isNotEmpty()) item(key = "bodybar") {
@@ -318,7 +332,7 @@ private fun ResultScreen(job: JobResult, vm: AppViewModel) {
                         shown = bodies.size, total = job.minorBodies.size,
                     )
                 }
-                minorBodyItems(bodies, job.time != null)
+                minorBodyItems(bodies, job.time != null, thumbs)
             }
             else -> detailItems(job)
         }
@@ -481,8 +495,54 @@ private fun FilterBar(sort: String, options: List<String>, onSort: (Int) -> Unit
     }
 }
 
+/**
+ * Brightness and contrast are applied to the pixels on screen, not re-fetched from the
+ * server: a faint candidate usually needs a harder stretch than the whole frame does.
+ */
+private fun bcFilter(brightness: Float, contrast: Float): ColorFilter? {
+    if (brightness == 1f && contrast == 1f) return null
+    val shift = (1f - contrast) * 127.5f * brightness
+    val k = contrast * brightness
+    return ColorFilter.colorMatrix(ColorMatrix(floatArrayOf(
+        k, 0f, 0f, 0f, shift,
+        0f, k, 0f, 0f, shift,
+        0f, 0f, k, 0f, shift,
+        0f, 0f, 0f, 1f, 0f,
+    )))
+}
+
 @Composable
-private fun AnnotatedImage(url: String, tall: Boolean, onToggleHeight: () -> Unit) {
+private fun DisplayRow(brightness: Float, contrast: Float, onBrightness: (Float) -> Unit,
+                       onContrast: (Float) -> Unit, onReset: () -> Unit) {
+    Column(Modifier.padding(horizontal = 12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.LightMode, "Brightness", Modifier.size(16.dp))
+            Slider(brightness, onBrightness, valueRange = 0.3f..3f, modifier = Modifier.weight(1f))
+            Icon(Icons.Default.Contrast, "Contrast", Modifier.size(16.dp))
+            Slider(contrast, onContrast, valueRange = 0.3f..3f, modifier = Modifier.weight(1f))
+            TextButton(onClick = onReset) { Text("Reset", style = MaterialTheme.typography.labelMedium) }
+        }
+    }
+}
+
+/** Builds close-up URLs that follow the current brightness and contrast. */
+private class Thumbs(val vm: AppViewModel, val jobId: String, val brightness: Float, val contrast: Float) {
+    fun url(x: Double, y: Double, size: Int = 90, zoom: Int = 4) =
+        vm.api.fileUrl(jobId, "cutout.jpg") +
+            "?x=$x&y=$y&size=$size&zoom=$zoom&brightness=$brightness&contrast=$contrast"
+}
+
+@Composable
+private fun Thumb(url: String, label: String) {
+    AsyncImage(
+        model = url, contentDescription = "Close-up of $label",
+        modifier = Modifier.fillMaxWidth().height(180.dp).clip(RoundedCornerShape(8.dp)).background(Color.Black),
+    )
+}
+
+@Composable
+private fun AnnotatedImage(url: String, tall: Boolean, brightness: Float, contrast: Float,
+                           onToggleHeight: () -> Unit) {
     var scale by remember { mutableFloatStateOf(1f) }
     var ox by remember { mutableFloatStateOf(0f) }
     var oy by remember { mutableFloatStateOf(0f) }
@@ -498,6 +558,7 @@ private fun AnnotatedImage(url: String, tall: Boolean, onToggleHeight: () -> Uni
     ) {
         AsyncImage(
             model = url, contentDescription = "Annotated image",
+            colorFilter = bcFilter(brightness, contrast),
             modifier = Modifier.fillMaxSize().graphicsLayer(scaleX = scale, scaleY = scale, translationX = ox, translationY = oy),
         )
         Row(Modifier.align(Alignment.TopEnd)) {
@@ -542,14 +603,16 @@ private fun SummaryRow(job: JobResult) {
 
 private val CARD = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
 
-private fun LazyListScope.candidateItems(items: List<Candidate>, uri: UriHandler) {
+private fun LazyListScope.candidateItems(items: List<Candidate>, uri: UriHandler, thumbs: Thumbs) {
     if (items.isEmpty()) {
         item { Empty("Nothing unexpected above the catalogue limit.") }
         return
     }
     items(items, key = { "c" + it.ra + it.dec }) { c ->
-        ElevatedCard(CARD) {
+        var open by remember { mutableStateOf(false) }
+        ElevatedCard(CARD.clickable { open = !open }) {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (open) Thumb(thumbs.url(c.x, c.y), c.label)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Badge(if (c.status == "unidentified") "NEW?" else "KNOWN",
                         if (c.status == "unidentified") Danger else Warn)
@@ -596,18 +659,20 @@ private fun VariableToolbar(job: JobResult, vm: AppViewModel, query: String, onQ
     }
 }
 
-private fun LazyListScope.variableItems(items: List<Variable>, band: String, uri: UriHandler) {
+private fun LazyListScope.variableItems(items: List<Variable>, band: String, uri: UriHandler, thumbs: Thumbs) {
     if (items.isEmpty()) {
         item { Empty("Nothing matches the filter.") }
         return
     }
-    items(items, key = { "v" + it.oid + it.ra }) { v -> VariableCard(v, band) { uri.openUri(v.vsxUrl) } }
+    items(items, key = { "v" + it.oid + it.ra }) { v -> VariableCard(v, band, thumbs) { uri.openUri(v.vsxUrl) } }
 }
 
 @Composable
-private fun VariableCard(v: Variable, band: String, onOpen: () -> Unit) {
-    ElevatedCard(CARD) {
+private fun VariableCard(v: Variable, band: String, thumbs: Thumbs, onOpen: () -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    ElevatedCard(CARD.clickable { open = !open }) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            if (open) Thumb(thumbs.url(v.x, v.y), v.name)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(v.name, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
@@ -640,7 +705,7 @@ private fun VariableCard(v: Variable, band: String, onOpen: () -> Unit) {
     }
 }
 
-private fun LazyListScope.minorBodyItems(items: List<MinorBody>, haveTime: Boolean) {
+private fun LazyListScope.minorBodyItems(items: List<MinorBody>, haveTime: Boolean, thumbs: Thumbs) {
     if (items.isEmpty()) {
         item {
             Empty(if (haveTime) "No known asteroids or comets brighter than the image limit."
@@ -649,8 +714,10 @@ private fun LazyListScope.minorBodyItems(items: List<MinorBody>, haveTime: Boole
         return
     }
     items(items, key = { "m" + it.name }) { m ->
-        ElevatedCard(CARD) {
-            Column(Modifier.padding(12.dp)) {
+        var open by remember { mutableStateOf(false) }
+        ElevatedCard(CARD.clickable { open = !open }) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (open) Thumb(thumbs.url(m.x, m.y), m.name)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(m.name, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                     if (m.detected) Badge("DETECTED ${f(m.measuredMag, 1)}", Amber) else Badge("NOT SEEN", Color.Gray)

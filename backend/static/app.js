@@ -8,6 +8,7 @@ const store = {
 };
 const COLORS = { unidentified: "#ff5a5f", known: "#ffd23f", variable: "#5cd0ff", limit: "#8b97b0", minor: "#ffa94d", minorMiss: "#9c7a55" };
 let job = null, pollTimer = null, view = { z: 1, x: 0, y: 0 }, selected = null;
+let display = { brightness: Number(store.get("sp_bright")) || 1, contrast: Number(store.get("sp_contrast")) || 1 };
 
 // ---------------------------------------------------------------- server status
 fetch("/api/health").then((r) => r.json()).then((h) => {
@@ -102,7 +103,9 @@ function render(r) {
   $("#dlAavso").classList.toggle("hidden", !r.time);
   $("#btnVsnet").classList.toggle("hidden", !r.time);
   const img = $("#img");
+  $("#selectedCard").classList.add("hidden");
   img.onload = () => { $("#overlay").setAttribute("viewBox", `0 0 ${img.naturalWidth} ${img.naturalHeight}`);
+    applyDisplay();
     $("#overlay").setAttribute("width", img.naturalWidth); $("#overlay").setAttribute("height", img.naturalHeight); fit(); drawOverlay(); };
   img.src = base + "preview.jpg";
   $("#results").scrollIntoView({ behavior: "smooth" });
@@ -303,8 +306,47 @@ function showTip(key, e) {
   tip.innerHTML = describe(key); tip.classList.remove("hidden");
   tip.style.left = Math.min(e.clientX - b.left + 14, b.width - 290) + "px"; tip.style.top = e.clientY - b.top + 14 + "px";
 }
+function applyDisplay() {
+  $("#img").style.filter = `brightness(${display.brightness}) contrast(${display.contrast})`;
+  $("#bright").value = display.brightness;
+  $("#contrast").value = display.contrast;
+  store.set("sp_bright", String(display.brightness));
+  store.set("sp_contrast", String(display.contrast));
+  if (selected) showSelected(selected);      // keep the close-up in step with the viewer
+}
+$("#bright")?.addEventListener("input", (e) => { display.brightness = +e.target.value; applyDisplay(); });
+$("#contrast")?.addEventListener("input", (e) => { display.contrast = +e.target.value; applyDisplay(); });
+$("#bcReset")?.addEventListener("click", () => { display = { brightness: 1, contrast: 1 }; applyDisplay(); });
+
+// close-up of whatever is selected, cut from the preview on the server
+function showSelected(key) {
+  const o = lookup(key), card = $("#selectedCard");
+  if (!o) { card.classList.add("hidden"); return; }
+  const url = `/api/jobs/${job.id}/cutout.jpg?x=${o.x.toFixed(1)}&y=${o.y.toFixed(1)}` +
+    `&size=90&zoom=4&brightness=${display.brightness}&contrast=${display.contrast}`;
+  const title = key[0] === "v" ? o.name : key[0] === "m" ? o.name : o.label;
+  const facts = key[0] === "v"
+    ? [["Type", o.type], ["Magnitude", (o.upper_limit ? "fainter than " : "") + fmt(o.mag, 3)],
+       ["Error", fmt(o.err, 3)], ["VSX range", o.max == null ? "–" : `${fmt(o.max, 2)}–${fmt(o.min, 2)}`],
+       ["Position", sky(o)]]
+    : key[0] === "m"
+      ? [["Class", o.class], ["Predicted V", fmt(o.vmag, 1)], ["Detected", o.detected ? "yes" : "no"],
+         ["Measured", fmt(o.measured_mag, 2)], ["Position", sky(o)]]
+      : [["Magnitude", fmt(o.mag, 2)], ["SNR", fmt(o.snr, 0)], ["FWHM", fmt(o.fwhm_px, 1) + " px"],
+         ["Identified", o.known ? `${o.known.name} (${o.known.catalog})` : "no"], ["Position", sky(o)]];
+  card.classList.remove("hidden");
+  card.innerHTML = `<div class="tableHead"><h2>Close-up</h2><span class="grow"></span>
+      <button class="ghost small" id="selClose">×</button></div>
+    <img src="${url}" alt="close-up of ${esc(title)}">
+    <div class="facts"><div><span>Object</span><span>${esc(title)}</span></div>
+      ${facts.map(([k, v]) => `<div><span>${esc(k)}</span><span>${esc(v ?? "–")}</span></div>`).join("")}</div>
+    <div class="links"><a class="btn small" target="_blank" rel="noopener" href="${aladin(o.ra, o.dec)}">Aladin</a>
+      ${key[0] === "v" ? `<a class="btn small" target="_blank" rel="noopener" href="${esc(o.vsx_url)}">VSX</a>` : ""}</div>`;
+  $("#selClose").onclick = () => { selected = null; card.classList.add("hidden"); drawOverlay(); };
+}
+
 function select(key) {
-  selected = key; drawOverlay();
+  selected = key; drawOverlay(); showSelected(key);
   document.querySelectorAll("tbody tr.sel").forEach((tr) => tr.classList.remove("sel"));
   const tr = document.querySelector(`tr[data-k="${key}"]`);
   if (tr) { tr.classList.add("sel"); tr.scrollIntoView({ block: "nearest", behavior: "smooth" }); }

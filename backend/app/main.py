@@ -4,6 +4,7 @@ POST /api/jobs            upload an image (multipart), returns job id
 GET  /api/jobs            recent jobs
 GET  /api/jobs/{id}       status + full results (poll until status is done/failed)
 GET  /api/jobs/{id}/preview.jpg | annotated.jpg | wcs.fits | solution.wcs | aavso.txt | photometry.csv | candidates.csv
+GET  /api/jobs/{id}/cutout.jpg?x=&y=  close-up of one object
 GET  /api/jobs/{id}/report.pdf    printable PDF report
 GET  /api/jobs/{id}/vsnet         composed vsnet-obs posting (JSON, or text with ?plain=true)
 DELETE /api/jobs/{id}
@@ -282,6 +283,49 @@ def job_vsnet(job_id: str, observer: str = "", site: str = "", instrument: str =
     if plain:
         return PlainTextResponse(rep["body"])
     return rep
+
+
+@app.get("/api/jobs/{job_id}/cutout.jpg", dependencies=[Depends(auth)])
+def job_cutout(job_id: str, x: float, y: float, size: int = 80, zoom: int = 4, mark: bool = True,
+               brightness: float = 1.0, contrast: float = 1.0):
+    """A close-up of one object, cut from the preview around a full-resolution pixel position.
+
+    Cut from the preview rather than the original: the original may be a 50 MB raw file, and
+    for judging whether something looks like a star the stretched preview is what you want.
+    """
+    from PIL import Image, ImageDraw, ImageEnhance
+
+    r = _load(job_id)
+    path = JOBS_DIR / job_id / "preview.jpg"
+    if not path.exists():
+        raise HTTPException(404, "no preview for this job")
+    scale = float((r.get("preview") or {}).get("scale") or 1.0)
+    size = max(16, min(size, 400))
+    zoom = max(1, min(zoom, 12))
+
+    with Image.open(path) as im:
+        im = im.convert("RGB")
+        cx, cy = x * scale, y * scale
+        half = size / 2
+        box = (int(round(cx - half)), int(round(cy - half)), int(round(cx + half)), int(round(cy + half)))
+        crop = im.crop(box)          # PIL pads out-of-bounds areas with black
+    if abs(brightness - 1.0) > 0.01:
+        crop = ImageEnhance.Brightness(crop).enhance(brightness)
+    if abs(contrast - 1.0) > 0.01:
+        crop = ImageEnhance.Contrast(crop).enhance(contrast)
+    crop = crop.resize((crop.width * zoom, crop.height * zoom), Image.LANCZOS)
+    if mark:
+        d = ImageDraw.Draw(crop)
+        c, radius, gap = crop.width / 2, crop.width / 6, crop.width / 14
+        d.ellipse([c - radius, c - radius, c + radius, c + radius], outline=(255, 90, 90), width=2)
+        for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):      # crosshair ticks, centre left clear
+            d.line([c + dx * (radius + gap), c + dy * (radius + gap),
+                    c + dx * (radius + gap * 2.4), c + dy * (radius + gap * 2.4)],
+                   fill=(255, 90, 90), width=2)
+    buf = io.BytesIO()
+    crop.save(buf, "JPEG", quality=88)
+    return Response(buf.getvalue(), media_type="image/jpeg",
+                    headers={"Cache-Control": "public, max-age=3600"})
 
 
 @app.get("/api/db/stats", dependencies=[Depends(auth)])
