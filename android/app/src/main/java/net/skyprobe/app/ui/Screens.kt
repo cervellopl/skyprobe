@@ -7,6 +7,7 @@ import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
@@ -32,16 +33,20 @@ import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.UriHandler
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import kotlinx.coroutines.launch
 import net.skyprobe.app.AppViewModel
+import net.skyprobe.app.R
 import net.skyprobe.app.NOT_CONFIGURED
 import net.skyprobe.app.Phone
 import net.skyprobe.app.UiState
@@ -52,6 +57,9 @@ import net.skyprobe.app.net.Variable
 import net.skyprobe.app.net.BlockedException
 import net.skyprobe.app.net.VsnetReport
 import kotlin.math.abs
+
+/** Keeps a settings field numeric without fighting the keyboard. */
+private fun String.filterNumber(): String = filter { it.isDigit() || it == '.' || it == ',' }.replace(',', '.')
 
 internal fun f(v: Double?, d: Int = 2): String = if (v == null || v.isNaN()) "–" else String.format("%.${d}f", v)
 
@@ -67,7 +75,13 @@ fun AppScaffold(state: UiState, vm: AppViewModel) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("SkyProbe") },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Image(painterResource(R.drawable.ic_brand), null, Modifier.size(30.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("SkyProbe")
+                    }
+                },
                 navigationIcon = {
                     if (state.job != null) IconButton(onClick = { vm.clearJob() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
@@ -838,6 +852,11 @@ private fun LazyListScope.detailItems(job: JobResult) {
                 Row2("Colour term", f(it.colorTerm, 3))
                 Row2("Limiting mag (5σ)", f(it.limitMag, 1))
             }
+            job.settings?.let {
+                if (it.aperturePx > 0) Row2("Aperture / sky", "${f(it.aperturePx, 1)} px" +
+                    (it.annulusPx.takeIf { a -> a.size == 2 }?.let { a -> " · ${f(a[0], 1)}–${f(a[1], 1)} px" } ?: ""))
+                if (it.snrMin > 0) Row2("Candidate min SNR", f(it.snrMin, 0))
+            }
             job.time?.let { Row2("Time (UTC)", "${it.utcMid}  (${it.source})") }
         }
     }
@@ -908,6 +927,31 @@ private fun SettingsDialog(state: UiState, vm: AppViewModel, onClose: () -> Unit
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
+                HorizontalDivider(Modifier.padding(top = 4.dp))
+                Text("Measurement", style = MaterialTheme.typography.titleSmall)
+                Text("Radii are given in star widths (FWHM), which the server measures on each image. "
+                        + "Leave a field empty to let it choose.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(s.aperture, { s = s.copy(aperture = it.filterNumber()) },
+                        label = { Text("Aperture") }, placeholder = { Text("1.4") }, singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.weight(1f))
+                    OutlinedTextField(s.annulusIn, { s = s.copy(annulusIn = it.filterNumber()) },
+                        label = { Text("Sky inner") }, placeholder = { Text("auto") }, singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.weight(1f))
+                    OutlinedTextField(s.annulusOut, { s = s.copy(annulusOut = it.filterNumber()) },
+                        label = { Text("Sky outer") }, placeholder = { Text("auto") }, singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.weight(1f))
+                }
+                OutlinedTextField(s.snrMin, { s = s.copy(snrMin = it.filterNumber()) },
+                    label = { Text("Minimum SNR of a new-object candidate") }, placeholder = { Text("7") },
+                    singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    supportingText = { Text("Raise it to 10-15 if most candidates turn out to be false") },
+                    modifier = Modifier.fillMaxWidth())
+                HorizontalDivider(Modifier.padding(top = 4.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(s.lat, { s = s.copy(lat = it) }, label = { Text("Latitude") }, singleLine = true, modifier = Modifier.weight(1f))
                     OutlinedTextField(s.lon, { s = s.copy(lon = it) }, label = { Text("Longitude") }, singleLine = true, modifier = Modifier.weight(1f))

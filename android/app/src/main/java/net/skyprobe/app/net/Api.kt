@@ -109,6 +109,15 @@ data class Meta(
     @SerialName("focal35_mm") val focal35: Double? = null,
 )
 
+/** What the server actually measured with, so a result can be read back later. */
+@Serializable
+data class RunSettings(
+    @SerialName("aperture_px") val aperturePx: Double = 0.0,
+    @SerialName("annulus_px") val annulusPx: List<Double> = emptyList(),
+    @SerialName("aperture_fwhm") val apertureFwhm: Double = 0.0,
+    @SerialName("snr_min") val snrMin: Double = 0.0,
+)
+
 @Serializable
 data class Detections(val count: Int = 0, @SerialName("fwhm_px") val fwhmPx: Double? = null, @SerialName("fwhm_arcsec") val fwhmArcsec: Double? = null)
 
@@ -119,7 +128,7 @@ data class JobResult(
     val interrupted: Boolean = false, val stalled: Boolean = false,
     val warnings: List<String> = emptyList(),
     val file: FileInfo? = null, val time: ObsTime? = null, val meta: Meta? = null,
-    val detections: Detections? = null,
+    val detections: Detections? = null, val settings: RunSettings? = null,
     val solution: Solution? = null, val calibration: Calibration? = null,
     val variables: List<Variable> = emptyList(),
     val candidates: List<Candidate> = emptyList(),

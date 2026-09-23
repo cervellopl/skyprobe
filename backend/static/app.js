@@ -182,7 +182,8 @@ function renderCalib(r) {
       <dt>Zero point</dt><dd>${fmt(c.zero_point, 3)} ± ${fmt(c.rms, 3)} mag</dd>
       <dt>Colour term</dt><dd>${fmt(c.color_term, 3)}</dd>
       <dt>Limiting mag (5σ)</dt><dd>${fmt(c.limit_mag_5sigma, 1)}</dd>
-      <dt>Aperture</dt><dd>${fmt(c.aperture_px, 1)} px</dd>
+      <dt>Aperture</dt><dd>${fmt(c.aperture_px, 1)} px${c.annulus_px ? ` <span class="muted small">sky ${fmt(c.annulus_px[0], 1)}–${fmt(c.annulus_px[1], 1)} px</span>` : ""}</dd>
+      ${r.settings ? `<dt>Candidate min SNR</dt><dd>${fmt(r.settings.snr_min, 0)}</dd>` : ""}
     </dl>` : `<p class="empty">No photometric calibration.</p>`}`;
 }
 

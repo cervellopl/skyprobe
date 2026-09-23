@@ -445,3 +445,15 @@ def test_results_never_carry_nan_into_json(tmp_path, monkeypatch):
     r = main._load(job_id)
     assert r["variables"][0]["airmass"] is None
     _json.dumps(r, allow_nan=False)      # what the API does; used to raise
+
+
+def test_aperture_settings_are_honoured_and_ordered():
+    from app.photometry import Apertures, aperture_radii
+
+    fwhm = 4.0
+    assert aperture_radii(fwhm) == aperture_radii(fwhm, Apertures())          # no setting = old behaviour
+    r, r_in, r_out = aperture_radii(fwhm, Apertures(2.0, 3.0, 5.0))
+    assert (r, r_in, r_out) == (8.0, 12.0, 20.0)
+    # a sky annulus set inside the aperture is pushed back out instead of poisoning the sky
+    r, r_in, r_out = aperture_radii(fwhm, Apertures(2.0, 0.5, 0.6))
+    assert r_in > r and r_out > r_in

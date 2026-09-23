@@ -17,13 +17,39 @@ import sep
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 
+from dataclasses import dataclass
+
 from .catalogs import band_mag
 
 
-def aperture_radii(fwhm: float):
-    r = float(np.clip(1.4 * fwhm, 2.0, 40.0))
-    r_in = r + max(3.0, fwhm)
-    r_out = r_in + max(5.0, 2.0 * fwhm)
+@dataclass(frozen=True)
+class Apertures:
+    """Aperture and sky annulus, in units of the measured FWHM.
+
+    None means "work it out from the seeing", which is what the pipeline did before these
+    became settings. Values are ordered and clamped afterwards, so a typo cannot produce a
+    sky annulus inside the aperture.
+    """
+
+    aperture: float | None = None
+    inner: float | None = None
+    outer: float | None = None
+
+    @property
+    def custom(self) -> bool:
+        return any(v is not None for v in (self.aperture, self.inner, self.outer))
+
+
+DEFAULT_APERTURES = Apertures()
+
+
+def aperture_radii(fwhm: float, ap: Apertures | None = None):
+    ap = ap or DEFAULT_APERTURES
+    r = float(np.clip((ap.aperture or 1.4) * fwhm, 2.0, 40.0))
+    r_in = float(ap.inner * fwhm) if ap.inner else r + max(3.0, fwhm)
+    r_in = max(r_in, r + 1.0)
+    r_out = float(ap.outer * fwhm) if ap.outer else r_in + max(5.0, 2.0 * fwhm)
+    r_out = max(r_out, r_in + 2.0)
     return r, r_in, r_out
 
 
@@ -147,9 +173,9 @@ class Calibration:
 
 
 def calibrate(wcs, sub, rms, data, gaia, vsx, fwhm, saturation, band, width, height, log=print, sky=None,
-              linear_sensor=True):
+              linear_sensor=True, ap: Apertures | None = None):
     """Build a Calibration from Gaia stars in the image. Returns (Calibration, info dict, comp table)."""
-    r, r_in, r_out = aperture_radii(fwhm)
+    r, r_in, r_out = aperture_radii(fwhm, ap)
     if len(gaia) == 0:
         raise RuntimeError("No Gaia stars in field")
     gx, gy = wcs.world_to_pixel(SkyCoord(gaia["ra"], gaia["dec"], unit="deg"))
@@ -243,8 +269,8 @@ def calibrate(wcs, sub, rms, data, gaia, vsx, fwhm, saturation, band, width, hei
 
 
 def measure_variables(wcs, cal: Calibration, comps: dict, vsx, sub, rms, data, fwhm, saturation, width, height,
-                      band, airmass_fn=None, sky=None):
-    r, r_in, r_out = aperture_radii(fwhm)
+                      band, airmass_fn=None, sky=None, ap: Apertures | None = None):
+    r, r_in, r_out = aperture_radii(fwhm, ap)
     if len(vsx) == 0:
         return []
     vc = SkyCoord(vsx["ra"], vsx["dec"], unit="deg")

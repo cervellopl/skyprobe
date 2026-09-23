@@ -18,16 +18,17 @@ from astropy.coordinates import SkyCoord
 import astropy.units as u
 
 from .catalogs import band_mag, pgc_galaxies_near
-from .photometry import aperture_radii, measure
+from .photometry import Apertures, aperture_radii, measure
 
 
 def search(wcs, det: dict, gaia, vsx, minor_bodies: list, cal, fwhm, pixel_scale, saturation, band,
-           gaia_mag_limit, width, height, sub, rms, data, log=print, max_candidates=60, limit_mag=None):
+           gaia_mag_limit, width, height, sub, rms, data, log=print, max_candidates=60, limit_mag=None,
+           snr_min: float = 7.0, ap: Apertures | None = None):
     o = det["objs"]
     if not o:
         return [], []
     n = len(o["x"])
-    r, r_in, r_out = aperture_radii(fwhm)
+    r, r_in, r_out = aperture_radii(fwhm, ap)
     flux, ferr, peak, snr = measure(sub, rms, o["x"], o["y"], r, r_in, r_out, saturation, data)
     with np.errstate(invalid="ignore", divide="ignore"):
         minst = -2.5 * np.log10(flux)
@@ -78,7 +79,7 @@ def search(wcs, det: dict, gaia, vsx, minor_bodies: list, cal, fwhm, pixel_scale
     for i in range(n):
         if not o["on_sky"][i]:      # lit foreground: buildings, trees, the ground
             continue
-        if edge[i] or hot[i] or trail[i] or sat[i] or near_bright[i] or snr[i] < 7 or not np.isfinite(mags[i]):
+        if edge[i] or hot[i] or trail[i] or sat[i] or near_bright[i] or snr[i] < snr_min or not np.isfinite(mags[i]):
             continue
         matched = gsep[i] < match_r * (2.5 if diffuse[i] else 1.0)
         kind = None
@@ -111,7 +112,7 @@ def search(wcs, det: dict, gaia, vsx, minor_bodies: list, cal, fwhm, pixel_scale
                            "ra": float(sky[i].ra.deg), "dec": float(sky[i].dec.deg),
                            "mag": float(mags[i]), "snr": float(snr[i]), "fwhm_px": float(o["fwhm"][i]),
                            "elongation": float(elong[i]), **info})
-    log(f"transient search: {len(candidates)} raw candidates from {n} detections")
+    log(f"transient search: {len(candidates)} raw candidates from {n} detections (SNR >= {snr_min:g})")
 
     # --- identify against known objects --------------------------------------------------------
     mb_results = []

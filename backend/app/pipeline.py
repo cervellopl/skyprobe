@@ -244,11 +244,20 @@ def run(job, opts: dict, workdir: Path, log):
     # ---- photometric calibration ---------------------------------------------------------------
     job.set_stage("photometric calibration", 60)
     band = (opts.get("band") or img.band).upper()
+    ap = photometry.Apertures(_num(opts.get("aperture")), _num(opts.get("annulus_in")), _num(opts.get("annulus_out")))
+    snr_min = _num(opts.get("snr_min")) or 7.0
+    r_ap, r_in, r_out = photometry.aperture_radii(fwhm, ap)
+    res["settings"] = {"aperture_fwhm": round(r_ap / fwhm, 2), "annulus_in_fwhm": round(r_in / fwhm, 2),
+                       "annulus_out_fwhm": round(r_out / fwhm, 2), "aperture_px": round(r_ap, 2),
+                       "annulus_px": [round(r_in, 2), round(r_out, 2)], "snr_min": snr_min,
+                       "detect_sigma": float(opts.get("detect_sigma") or 5.0)}
+    if ap.custom:
+        log(f"apertures: r={r_ap:.1f} px, sky {r_in:.1f}-{r_out:.1f} px (FWHM {fwhm:.2f} px)")
     cal, comps = None, None
     try:
         cal, cal_info, comps = photometry.calibrate(wcs, det["sub"], det["rms"], img.data, gaia, vsx, fwhm,
                                                     img.saturation, band, w, h, log=log, sky=det.get("sky"),
-                                                    linear_sensor=img.linear and img.fmt == "fits")
+                                                    linear_sensor=img.linear and img.fmt == "fits", ap=ap)
         cal_info["gaia_mag_limit"] = maglim
         res["calibration"] = cal_info
         if abs(cal_info.get("response_slope", 0.0)) > 0.05 or abs(cal_info.get("response_curve", 0.0)) > 0.02:
@@ -270,7 +279,7 @@ def run(job, opts: dict, workdir: Path, log):
         job.set_stage("variable star photometry", 70)
         res["variables"] = photometry.measure_variables(wcs, cal, comps, vsx, det["sub"], det["rms"], img.data,
                                                         fwhm, img.saturation, w, h, band, airmass_fn,
-                                                        sky=det.get("sky"))
+                                                        sky=det.get("sky"), ap=ap)
         log(f"measured {len(res['variables'])} VSX variables")
         nonlinear = (abs(res.get("calibration", {}).get("response_slope", 0.0)) > 0.05
                      or res.get("calibration", {}).get("response_curve_amplitude", 0.0) > 0.15)
@@ -301,7 +310,8 @@ def run(job, opts: dict, workdir: Path, log):
         job.set_stage("searching for new objects", 82)
         cands, mbs = transients.search(wcs, det, gaia, vsx, minor, cal, fwhm, summary["pixel_scale"],
                                        img.saturation, band, maglim, w, h, det["sub"], det["rms"], img.data,
-                                       log=log, limit_mag=(res.get("calibration") or {}).get("limit_mag_5sigma"))
+                                       log=log, limit_mag=(res.get("calibration") or {}).get("limit_mag_5sigma"),
+                                       snr_min=snr_min, ap=ap)
         # known asteroids/comets stay useful even when the candidate search is not meaningful
         res["candidates"] = cands if searchable else []
         res["minor_bodies"] = sorted(mbs, key=lambda m: (m["vmag"] is None, m["vmag"] or 99))

@@ -35,6 +35,11 @@ data class Settings(
     val lat: String = "",
     val lon: String = "",
     val forceVsnet: Boolean = false,   // allow postings from images with a non-linear response
+    // photometry, in units of the measured star width (FWHM); blank means "from the seeing"
+    val aperture: String = "",
+    val annulusIn: String = "",
+    val annulusOut: String = "",
+    val snrMin: String = "",           // minimum SNR for a new-object candidate
     val photometry: Boolean = true,
     val transients: Boolean = true,
 )
@@ -79,6 +84,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         lat = prefs.getString("lat", "") ?: "",
         lon = prefs.getString("lon", "") ?: "",
         forceVsnet = prefs.getBoolean("forceVsnet", false),
+        aperture = prefs.getString("aperture", "") ?: "",
+        annulusIn = prefs.getString("annulusIn", "") ?: "",
+        annulusOut = prefs.getString("annulusOut", "") ?: "",
+        snrMin = prefs.getString("snrMin", "") ?: "",
         photometry = prefs.getBoolean("photometry", true),
         transients = prefs.getBoolean("transients", true),
     )
@@ -92,6 +101,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             putString("lat", s.lat); putString("lon", s.lon)
             putBoolean("photometry", s.photometry); putBoolean("transients", s.transients)
             putBoolean("forceVsnet", s.forceVsnet)
+            putString("aperture", s.aperture); putString("annulusIn", s.annulusIn)
+            putString("annulusOut", s.annulusOut); putString("snrMin", s.snrMin)
         }.apply()
         val serverChanged = s.server != _state.value.settings.server || s.token != _state.value.settings.token
         _state.update { it.copy(settings = s) }
@@ -172,6 +183,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 if (s.lat.isNotBlank()) put("lat", s.lat)
                 if (s.lon.isNotBlank()) put("lon", s.lon)
                 if (!obsTime.isNullOrBlank()) put("obs_time", obsTime)
+                if (s.aperture.isNotBlank()) put("aperture", s.aperture)
+                if (s.annulusIn.isNotBlank()) put("annulus_in", s.annulusIn)
+                if (s.annulusOut.isNotBlank()) put("annulus_out", s.annulusOut)
+                if (s.snrMin.isNotBlank()) put("snr_min", s.snrMin)
             }
             runCatching {
                 api.submit(getApplication<Application>().contentResolver, uri, opts, allowDuplicate) { p ->

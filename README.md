@@ -153,7 +153,23 @@ Interactive docs (OpenAPI) at `/docs`. Set `API_TOKEN` to require `X-API-Key` on
 (`auto|local|remote`) · `api_key` (nova key) · `obs_time` (ISO UTC) · `utc_offset` (h) ·
 `lat`, `lon` · `band` (`TG`, `CV`, `V`, …) · `mag_limit` · `obscode` ·
 `photometry`, `transients` (`true|false`) · `use_header_wcs` · `detect_sigma` ·
+`aperture`, `annulus_in`, `annulus_out` (radii in FWHM; default 1.4 and a sky annulus
+derived from the seeing) · `snr_min` (minimum SNR of a new-object candidate, default 7) ·
 `allow_duplicate` (`true` to analyse a picture the server already holds a second time).
+
+### Tuning the measurement
+
+The aperture and the sky annulus are given in units of the FWHM the server measures on each
+image, so one setting fits every focal length: `aperture=1.4` is the default, a tight
+`1.0` helps in crowded fields, `2.0` collects more light from a bright, well-separated star.
+`annulus_in`/`annulus_out` move the sky ring; whatever is entered, the ring is kept outside
+the aperture.
+
+`snr_min` is the floor for a new-object candidate (default 7). Most false candidates on a
+wide, short-focal-length frame are faint blends near the noise, so raising it to 10-15 is
+usually the quickest way to clean up the list - together with the catalogue-depth gate that
+skips the search entirely when the image goes deeper than the reference catalogue. The values
+used are reported back in `settings` and shown in the app.
 
 ### Duplicates, interrupted jobs and re-runs
 

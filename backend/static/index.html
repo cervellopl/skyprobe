@@ -63,6 +63,11 @@
             <select name="band"><option value="">auto (TG / CV)</option><option>TG</option><option>CV</option><option>V</option><option>TB</option><option>TR</option><option>B</option><option>R</option><option>I</option></select>
           </label>
           <label>Catalogue mag limit<input name="mag_limit" inputmode="decimal" placeholder="auto"></label>
+          <label title="Measuring aperture, in units of the star width (FWHM)">Aperture (x FWHM)<input name="aperture" inputmode="decimal" placeholder="1.4"></label>
+          <label title="Inner edge of the sky annulus">Sky inner (x FWHM)<input name="annulus_in" inputmode="decimal" placeholder="auto"></label>
+          <label title="Outer edge of the sky annulus">Sky outer (x FWHM)<input name="annulus_out" inputmode="decimal" placeholder="auto"></label>
+          <label title="Minimum signal-to-noise for a new-object candidate. Raise it if most candidates turn out to be false.">Candidate min SNR<input name="snr_min" inputmode="decimal" placeholder="7"></label>
+          <label title="Detection threshold in sigma above the background">Detection sigma<input name="detect_sigma" inputmode="decimal" placeholder="5"></label>
           <label>AAVSO observer code<input name="obscode" id="obscode" placeholder="XXX"></label>
           <label>Observer name (VSNET)<input id="observer" placeholder="Jan Kowalski"></label>
           <label>Observing site<input id="site" placeholder="Warsaw, Poland"></label>

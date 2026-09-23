@@ -297,13 +297,17 @@ async def create_job(
     photometry: str = Form("true"), transients: str = Form("true"),
     band: str = Form(""), mag_limit: str = Form(""), obscode: str = Form(""),
     use_header_wcs: str = Form("true"), detect_sigma: str = Form(""),
+    aperture: str = Form(""), annulus_in: str = Form(""), annulus_out: str = Form(""),
+    snr_min: str = Form(""),
     allow_duplicate: str = Form("false"),
 ):
     opts = {k: v for k, v in dict(device=device, scale=scale, scale_low=scale_low, scale_high=scale_high, ra=ra,
                                   dec=dec, radius=radius, solver=solver, api_key=api_key, obs_time=obs_time,
                                   utc_offset=utc_offset, lat=lat, lon=lon, photometry=photometry,
                                   transients=transients, band=band, mag_limit=mag_limit, obscode=obscode,
-                                  use_header_wcs=use_header_wcs, detect_sigma=detect_sigma).items()
+                                  use_header_wcs=use_header_wcs, detect_sigma=detect_sigma,
+                                  aperture=aperture, annulus_in=annulus_in, annulus_out=annulus_out,
+                                  snr_min=snr_min).items()
             if v not in ("", None)}
     return await _submit(file, opts, allow_duplicate=allow_duplicate.lower() in ("1", "true", "yes", "on"))
 
