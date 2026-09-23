@@ -93,6 +93,7 @@ fun AppScaffold(state: UiState, vm: AppViewModel) {
     }
     if (showSettings) SettingsDialog(state, vm) { showSettings = false }
     if (showHistory) HistoryDialog(state, vm) { showHistory = false }
+    state.duplicate?.let { DuplicateDialog(it, vm) }
 }
 
 @Composable
@@ -148,6 +149,23 @@ private fun HomeScreen(state: UiState, vm: AppViewModel) {
                     val p = if (job == null) state.uploadProgress * 0.2f else job.progress / 100f
                     LinearProgressIndicator(progress = { p.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
                     job?.error?.let { Text(it, color = Danger, style = MaterialTheme.typography.bodySmall) }
+                    if (job != null && job.failed) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = { vm.rerun(job.id) }) {
+                                Icon(Icons.Default.Refresh, null, Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp)); Text("Analyse again")
+                            }
+                            OutlinedButton(onClick = { vm.deleteJob(job.id) }) {
+                                Icon(Icons.Default.Delete, null, Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp)); Text("Delete")
+                            }
+                        }
+                    }
+                    if (job != null && job.stalled) {
+                        Text("This job has not reported any progress for a long time. You can re-analyse it.",
+                            color = Danger, style = MaterialTheme.typography.bodySmall)
+                        OutlinedButton(onClick = { vm.rerun(job.id) }) { Text("Analyse again") }
+                    }
                     job?.log?.takeLast(6)?.let { lines ->
                         Text(lines.joinToString("\n"), fontFamily = FontFamily.Monospace,
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -358,7 +376,52 @@ private fun ResultActions(job: JobResult, vm: AppViewModel, onVsnet: () -> Unit)
                 Text("vsnet-obs", style = MaterialTheme.typography.labelLarge)
             }
         }
+        OutlinedButton(onClick = { vm.rerun(job.id) },
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
+            Icon(Icons.Default.Refresh, null, Modifier.size(16.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("Again", style = MaterialTheme.typography.labelLarge)
+        }
+        var confirm by remember { mutableStateOf(false) }
+        OutlinedButton(onClick = { confirm = true },
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
+            Icon(Icons.Default.Delete, null, Modifier.size(16.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("Delete", style = MaterialTheme.typography.labelLarge)
+        }
+        if (confirm) ConfirmDelete(job.filename.ifBlank { job.id }, { confirm = false }) {
+            confirm = false; vm.deleteJob(job.id)
+        }
     }
+}
+
+@Composable
+private fun ConfirmDelete(name: String, onClose: () -> Unit, onDelete: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text("Delete this analysis?") },
+        text = { Text("$name, together with its measurements in the archive. The image itself stays in your gallery.") },
+        confirmButton = { TextButton(onClick = onDelete) { Text("Delete") } },
+        dismissButton = { TextButton(onClick = onClose) { Text("Keep") } },
+    )
+}
+
+/** The server recognised the picture by its contents, so it is not analysed twice by accident. */
+@Composable
+private fun DuplicateDialog(up: net.skyprobe.app.net.Upload, vm: AppViewModel) {
+    val when_ = if (up.created > 0) java.text.SimpleDateFormat("d MMM yyyy HH:mm", java.util.Locale.getDefault())
+        .format(java.util.Date((up.created * 1000).toLong())) else ""
+    AlertDialog(
+        onDismissRequest = { vm.dismissDuplicate() },
+        title = { Text("Already analysed") },
+        text = {
+            Text("This exact picture is already on the server" +
+                (up.filename?.takeIf { it.isNotBlank() }?.let { " as $it" } ?: "") +
+                (if (when_.isNotBlank()) ", from $when_" else "") + ".")
+        },
+        confirmButton = { TextButton(onClick = { vm.openDuplicate() }) { Text("Open it") } },
+        dismissButton = { TextButton(onClick = { vm.analyseAnyway() }) { Text("Analyse again") } },
+    )
 }
 
 /**
@@ -912,15 +975,33 @@ private fun HistoryDialog(state: UiState, vm: AppViewModel, onClose: () -> Unit)
         text = {
             if (state.history.isEmpty()) Text("Nothing yet.") else
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    items(state.history) { j ->
+                    items(state.history, key = { it.id }) { j ->
+                        var confirm by remember { mutableStateOf(false) }
                         ListItem(
                             headlineContent = { Text(j.filename ?: j.id, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                             supportingContent = {
-                                Text("${j.status} · ${j.nVariables} variables · ${j.nUnidentified} unidentified",
-                                    style = MaterialTheme.typography.bodySmall)
+                                val note = when {
+                                    j.interrupted -> "interrupted"
+                                    j.stalled -> "no progress"
+                                    else -> j.status
+                                }
+                                Text("$note · ${j.nVariables} variables · ${j.nUnidentified} unidentified",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (j.interrupted || j.stalled) Danger else MaterialTheme.colorScheme.onSurfaceVariant)
+                            },
+                            trailingContent = {
+                                Row {
+                                    if (j.canRerun) IconButton(onClick = { vm.rerun(j.id); onClose() }) {
+                                        Icon(Icons.Default.Refresh, "Analyse again")
+                                    }
+                                    IconButton(onClick = { confirm = true }) { Icon(Icons.Default.Delete, "Delete") }
+                                }
                             },
                             modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { vm.watch(j.id); onClose() },
                         )
+                        if (confirm) ConfirmDelete(j.filename ?: j.id, { confirm = false }) {
+                            confirm = false; vm.deleteJob(j.id)
+                        }
                     }
                 }
         },

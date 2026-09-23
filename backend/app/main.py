@@ -7,6 +7,7 @@ GET  /api/jobs/{id}/preview.jpg | annotated.jpg | wcs.fits | solution.wcs | aavs
 GET  /api/jobs/{id}/cutout.jpg?x=&y=[&source=original]  close-up of one object
 GET  /api/jobs/{id}/report.pdf    printable PDF report
 GET  /api/jobs/{id}/vsnet         composed vsnet-obs posting (JSON, or text with ?plain=true)
+POST /api/jobs/{id}/rerun     analyse the same file again (same job id)
 DELETE /api/jobs/{id}
 GET  /api/health          capabilities of this server
 GET  /api/db/stats | /api/db/stars | /api/db/star/{name} | /api/db/near | /api/db/images
@@ -26,6 +27,7 @@ import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
@@ -47,6 +49,13 @@ KEEP_JOBS = int(os.environ.get("KEEP_JOBS", 200))
 ALLOWED_EXT = RAW_EXT | FITS_EXT | JPEG_EXT
 
 executor = ThreadPoolExecutor(max_workers=int(os.environ.get("WORKERS", 1)))
+
+# a job is only ever worked on by this process, so anything left "running" on disk without an
+# entry here was interrupted (the server was restarted or killed) and will never finish
+RUNNING: set[str] = set()
+RUNNING_LOCK = threading.Lock()
+STALL_AFTER = int(os.environ.get("STALL_AFTER", 1800))   # seconds without progress before we say so
+INTERRUPTED = "interrupted - the server stopped while this image was being analysed"
 
 
 class Job:
@@ -70,6 +79,7 @@ class Job:
         self.save()
 
     def save(self):
+        self.result["updated"] = time.time()
         with self.lock:
             tmp = self.dir / "result.json.tmp"
             tmp.write_text(json.dumps(self.result, default=_json_default))
@@ -91,6 +101,8 @@ def _json_default(o):
 
 
 def _run_job(job: Job, opts: dict):
+    with RUNNING_LOCK:
+        RUNNING.add(job.id)
     try:
         pipeline.run(job, opts, job.dir, job.log)
         job.result.update({"status": "done", "stage": "done", "progress": 100})
@@ -104,6 +116,8 @@ def _run_job(job: Job, opts: dict):
         job.log("ERROR " + "".join(traceback.format_exception_only(type(e), e)).strip())
         traceback.print_exc()
     finally:
+        with RUNNING_LOCK:
+            RUNNING.discard(job.id)
         job.result["finished"] = time.time()
         job.save()
         _prune()
@@ -115,18 +129,108 @@ def _prune():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def _read(path: Path) -> dict:
+    """result.json is rewritten in place while a job runs, so a half-written read is possible."""
+    for _ in range(3):
+        try:
+            return json.loads(path.read_text())
+        except json.JSONDecodeError:
+            time.sleep(0.05)
+    raise HTTPException(503, "busy")
+
+
+def _write(job_id: str, result: dict) -> None:
+    with Job.lock:
+        tmp = JOBS_DIR / job_id / "result.json.tmp"
+        tmp.write_text(json.dumps(result, default=_json_default))
+        tmp.replace(JOBS_DIR / job_id / "result.json")
+
+
+def _check_alive(r: dict) -> dict:
+    """Turns a job abandoned by a restart into a failure, and flags one that stopped moving.
+
+    Without this an interrupted job stays "running" for ever and every client sits on it
+    waiting for a result that is never coming.
+    """
+    if r.get("status") not in ("queued", "running"):
+        return r
+    with RUNNING_LOCK:
+        alive = r["id"] in RUNNING
+    if not alive:
+        r.update({"status": "failed", "stage": "failed", "error": INTERRUPTED,
+                  "interrupted": True, "finished": time.time()})
+        r.setdefault("log", []).append(f"{time.strftime('%H:%M:%S')} ERROR {INTERRUPTED}")
+        try:
+            _write(r["id"], r)
+        except OSError:
+            pass
+    elif time.time() - (r.get("updated") or r.get("created") or 0) > STALL_AFTER:
+        r["stalled"] = True     # still ours, but it has not reported progress in a long while
+    return r
+
+
 def _load(job_id: str) -> dict:
     if not re.fullmatch(r"[a-f0-9]{16}", job_id):
         raise HTTPException(404, "unknown job")
     p = JOBS_DIR / job_id / "result.json"
     if not p.exists():
         raise HTTPException(404, "unknown job")
-    for _ in range(3):
+    return _check_alive(_read(p))
+
+
+def _input_file(job_id: str) -> Path:
+    for f in sorted((JOBS_DIR / job_id).glob("input.*")):
+        return f
+    raise HTTPException(410, "the image of this job is no longer on the server")
+
+
+def _job_hash(d: Path, r: dict) -> str | None:
+    """The digest is computed once and kept in result.json, so a scan stays cheap."""
+    digest = r.get("file_hash")
+    if digest:
+        return digest
+    src = next(iter(sorted(d.glob("input.*"))), None)
+    if src is None:
+        return None
+    digest = db.file_hash(src)
+    if digest:
+        r["file_hash"] = digest
         try:
-            return json.loads(p.read_text())
-        except json.JSONDecodeError:
-            time.sleep(0.05)
-    raise HTTPException(503, "busy")
+            _write(r["id"], r)
+        except (OSError, KeyError):
+            pass
+    return digest
+
+
+def _find_duplicate(digest: str, skip: str) -> dict | None:
+    """Looks for an earlier job made from a byte-identical file."""
+    dirs = sorted((d for d in JOBS_DIR.iterdir() if d.is_dir()), key=lambda d: d.stat().st_mtime, reverse=True)
+    for d in dirs:
+        if d.name == skip or not (d / "result.json").exists():
+            continue
+        try:
+            r = _read(d / "result.json")
+        except HTTPException:
+            continue
+        if _job_hash(d, r) == digest:
+            return r
+    return None
+
+
+def _sweep_stale() -> int:
+    """On start-up nothing is running yet, so every unfinished job on disk is a leftover."""
+    n = 0
+    for d in JOBS_DIR.iterdir():
+        if not (d.is_dir() and (d / "result.json").exists()):
+            continue
+        try:
+            r = _read(d / "result.json")
+        except HTTPException:
+            continue
+        if r.get("status") in ("queued", "running"):
+            _check_alive(r)
+            n += 1
+    return n
 
 
 def auth(x_api_key: str | None = Header(default=None), authorization: str | None = Header(default=None)):
@@ -137,7 +241,15 @@ def auth(x_api_key: str | None = Header(default=None), authorization: str | None
         raise HTTPException(401, "invalid or missing API token")
 
 
-app = FastAPI(title="SkyProbe", version=VERSION,
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    n = _sweep_stale()
+    if n:
+        print(f"[skyprobe] {n} unfinished job(s) from a previous run marked as interrupted")
+    yield
+
+
+app = FastAPI(title="SkyProbe", version=VERSION, lifespan=lifespan,
               description="Plate solving (astrometry.net), transient search and variable-star photometry "
                           "for phone and Seestar images.")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -165,6 +277,7 @@ async def create_job(
     photometry: str = Form("true"), transients: str = Form("true"),
     band: str = Form(""), mag_limit: str = Form(""), obscode: str = Form(""),
     use_header_wcs: str = Form("true"), detect_sigma: str = Form(""),
+    allow_duplicate: str = Form("false"),
 ):
     opts = {k: v for k, v in dict(device=device, scale=scale, scale_low=scale_low, scale_high=scale_high, ra=ra,
                                   dec=dec, radius=radius, solver=solver, api_key=api_key, obs_time=obs_time,
@@ -172,10 +285,10 @@ async def create_job(
                                   transients=transients, band=band, mag_limit=mag_limit, obscode=obscode,
                                   use_header_wcs=use_header_wcs, detect_sigma=detect_sigma).items()
             if v not in ("", None)}
-    return await _submit(file, opts)
+    return await _submit(file, opts, allow_duplicate=allow_duplicate.lower() in ("1", "true", "yes", "on"))
 
 
-async def _submit(file: UploadFile, opts: dict) -> dict:
+async def _submit(file: UploadFile, opts: dict, allow_duplicate: bool = False) -> dict:
     name = Path(file.filename or "upload").name
     ext = Path(name).suffix.lower()
     if ext not in ALLOWED_EXT:
@@ -201,11 +314,24 @@ async def _submit(file: UploadFile, opts: dict) -> dict:
                 shutil.rmtree(jdir, ignore_errors=True)
                 raise HTTPException(413, f"File larger than {MAX_UPLOAD_MB} MB")
             f.write(chunk)
+    digest = db.file_hash(dest)
+    if digest and not allow_duplicate:
+        earlier = _find_duplicate(digest, skip=job_id)
+        if earlier is not None:
+            shutil.rmtree(jdir, ignore_errors=True)
+            return JSONResponse(status_code=200, content={
+                "id": earlier["id"], "status": earlier.get("status"), "duplicate": True,
+                "url": f"/api/jobs/{earlier['id']}",
+                "filename": earlier.get("filename"), "created": earlier.get("created"),
+                "message": "This exact image has already been analysed. "
+                           "Send it again with allow_duplicate=true to analyse it a second time, "
+                           "or re-run the earlier job."})
     job = Job(job_id, name, str(dest), opts)
     job.result["size_bytes"] = size
+    job.result["file_hash"] = digest
     job.save()
     executor.submit(_run_job, job, opts)
-    return {"id": job_id, "status": "queued", "url": f"/api/jobs/{job_id}"}
+    return {"id": job_id, "status": "queued", "duplicate": False, "url": f"/api/jobs/{job_id}"}
 
 
 @app.get("/api/jobs", dependencies=[Depends(auth)])
@@ -214,12 +340,14 @@ def list_jobs(limit: int = 30):
     dirs = sorted((d for d in JOBS_DIR.iterdir() if d.is_dir()), key=lambda d: d.stat().st_mtime, reverse=True)
     for d in dirs[:limit]:
         try:
-            r = json.loads((d / "result.json").read_text())
+            r = _check_alive(json.loads((d / "result.json").read_text()))
         except Exception:
             continue
         s = r.get("solution") or {}
         out.append({"id": r["id"], "filename": r.get("filename"), "status": r.get("status"),
                     "stage": r.get("stage"), "created": r.get("created"), "ra": s.get("ra"), "dec": s.get("dec"),
+                    "stalled": bool(r.get("stalled")), "interrupted": bool(r.get("interrupted")),
+                    "can_rerun": (JOBS_DIR / r["id"]).is_dir() and any((JOBS_DIR / r["id"]).glob("input.*")),
                     "object": (r.get("meta") or {}).get("object"),
                     "n_variables": len(r.get("variables", [])),
                     "n_unidentified": sum(1 for c in r.get("candidates", []) if c.get("status") == "unidentified")})
@@ -231,10 +359,29 @@ def get_job(job_id: str):
     return JSONResponse(_load(job_id))
 
 
-@app.delete("/api/jobs/{job_id}", dependencies=[Depends(auth)])
-def delete_job(job_id: str):
+@app.post("/api/jobs/{job_id}/rerun", status_code=202, dependencies=[Depends(auth)])
+def rerun_job(job_id: str):
+    """Analyses the stored file again under the same id, with the options it was sent with."""
     r = _load(job_id)
     if r.get("status") in ("queued", "running"):
+        raise HTTPException(409, "this job is still running")
+    src = _input_file(job_id)
+    opts = dict(r.get("options") or {})
+    job = Job(job_id, r.get("filename") or src.name, str(src), opts)
+    job.result.update({"size_bytes": r.get("size_bytes"), "file_hash": r.get("file_hash"),
+                       "reruns": int(r.get("reruns") or 0) + 1})
+    job.log(f"re-analysing {job.filename}")
+    job.save()
+    for name in ("preview.jpg", "annotated.jpg", "report.pdf", "fullres.jpg"):
+        (JOBS_DIR / job_id / name).unlink(missing_ok=True)
+    executor.submit(_run_job, job, opts)
+    return {"id": job_id, "status": "queued", "url": f"/api/jobs/{job_id}"}
+
+
+@app.delete("/api/jobs/{job_id}", dependencies=[Depends(auth)])
+def delete_job(job_id: str, force: bool = False):
+    r = _load(job_id)
+    if r.get("status") in ("queued", "running") and not force:
         raise HTTPException(409, "job still running")
     shutil.rmtree(JOBS_DIR / job_id, ignore_errors=True)
     db.forget(job_id)

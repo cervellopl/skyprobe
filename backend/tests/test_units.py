@@ -1,4 +1,5 @@
 """Offline unit tests: python -m pytest tests/test_units.py  (no network needed)."""
+import time
 import sys
 from pathlib import Path
 
@@ -380,3 +381,49 @@ def test_database_backup_and_restore(tmp_path, monkeypatch):
     sqlite3.connect(empty).execute("CREATE TABLE unrelated (x)")
     with pytest.raises(ValueError):
         db.inspect(empty)
+
+
+def test_interrupted_job_is_reported_as_failed(tmp_path, monkeypatch):
+    """A job left "running" by a restart must not keep clients waiting for ever."""
+    import json as _json
+    from app import main
+
+    monkeypatch.setattr(main, "JOBS_DIR", tmp_path)
+    job_id = "0123456789abcdef"
+    (tmp_path / job_id).mkdir()
+    (tmp_path / job_id / "input.fits").write_bytes(b"x")
+    (tmp_path / job_id / "result.json").write_text(_json.dumps(
+        {"id": job_id, "status": "running", "stage": "solving", "progress": 40, "created": 1.0, "log": []}))
+
+    r = main._load(job_id)
+    assert r["status"] == "failed" and r["interrupted"] is True
+    # and the verdict is persisted, so the next reader sees it too
+    assert _json.loads((tmp_path / job_id / "result.json").read_text())["status"] == "failed"
+
+    # a job this process really is working on is left alone
+    (tmp_path / job_id / "result.json").write_text(_json.dumps(
+        {"id": job_id, "status": "running", "stage": "solving", "progress": 40,
+         "created": 1.0, "updated": time.time(), "log": []}))
+    main.RUNNING.add(job_id)
+    try:
+        assert main._load(job_id)["status"] == "running"
+    finally:
+        main.RUNNING.discard(job_id)
+
+
+def test_duplicate_upload_finds_the_earlier_job(tmp_path, monkeypatch):
+    import json as _json
+    from app import db, main
+
+    monkeypatch.setattr(main, "JOBS_DIR", tmp_path)
+    old, new = "a" * 16, "b" * 16
+    for jid, payload in ((old, b"same bytes"), (new, b"other bytes")):
+        (tmp_path / jid).mkdir()
+        (tmp_path / jid / "input.jpg").write_bytes(payload)
+        (tmp_path / jid / "result.json").write_text(_json.dumps({"id": jid, "status": "done", "created": 1.0}))
+
+    digest = db.file_hash(tmp_path / old / "input.jpg")
+    assert main._find_duplicate(digest, skip=new)["id"] == old      # matched by contents, not by name
+    assert main._find_duplicate(digest, skip=old) is None           # the only copy is the one we skipped
+    # the digest is cached in result.json so the next scan does not read the image again
+    assert _json.loads((tmp_path / old / "result.json").read_text())["file_hash"] == digest

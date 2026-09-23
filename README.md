@@ -134,7 +134,8 @@ Interactive docs (OpenAPI) at `/docs`. Set `API_TOKEN` to require `X-API-Key` on
 | `POST` | `/api/jobs` | multipart upload, returns `{"id": …}` (202) |
 | `GET` | `/api/jobs` | recent jobs |
 | `GET` | `/api/jobs/{id}` | status + full result (poll until `status` is `done`/`failed`) |
-| `DELETE` | `/api/jobs/{id}` | delete a finished job |
+| `POST` | `/api/jobs/{id}/rerun` | analyse the stored file again under the same id |
+| `DELETE` | `/api/jobs/{id}` | delete a job and its measurements (`?force=true` even while it runs) |
 | `GET` | `/api/jobs/{id}/preview.jpg` | stretched preview |
 | `GET` | `/api/jobs/{id}/annotated.jpg` | preview with markers drawn |
 | `GET` | `/api/jobs/{id}/wcs.fits`, `/solution.wcs` | the astrometric solution |
@@ -150,7 +151,23 @@ Interactive docs (OpenAPI) at `/docs`. Set `API_TOKEN` to require `X-API-Key` on
 `scale_low`, `scale_high` (″/px) · `ra`, `dec`, `radius` (deg) · `solver`
 (`auto|local|remote`) · `api_key` (nova key) · `obs_time` (ISO UTC) · `utc_offset` (h) ·
 `lat`, `lon` · `band` (`TG`, `CV`, `V`, …) · `mag_limit` · `obscode` ·
-`photometry`, `transients` (`true|false`) · `use_header_wcs` · `detect_sigma`.
+`photometry`, `transients` (`true|false`) · `use_header_wcs` · `detect_sigma` ·
+`allow_duplicate` (`true` to analyse a picture the server already holds a second time).
+
+### Duplicates, interrupted jobs and re-runs
+
+An upload is hashed before it is queued. If a byte-identical picture has been analysed
+before, the answer is `200 {"id": <earlier job>, "duplicate": true}` instead of a new job,
+and nothing is queued; the web page and the Android app then offer to open that analysis or
+to send the file again with `allow_duplicate=true`.
+
+Analysis runs inside the server process, so a job still marked `running` on disk without a
+worker behind it was interrupted by a restart or a crash. Those are turned into
+`status: "failed"` with `interrupted: true` - on start-up and whenever they are read - so
+nothing waits for a result that is never coming. A job that is genuinely ours but has not
+reported progress for `STALL_AFTER` seconds (default 1800) is returned with `stalled: true`.
+Either way `POST /api/jobs/{id}/rerun` starts the pipeline over on the copy of the image the
+server kept, with the options the job was created with.
 
 ### Result shape
 

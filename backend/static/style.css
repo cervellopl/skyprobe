@@ -111,3 +111,9 @@ dialog textarea { width: 100%; background: var(--panel2); color: var(--text); bo
 #selectedCard .facts { font-size: 13px; margin-top: 8px; }
 #selectedCard .facts div { display: flex; justify-content: space-between; gap: 10px; padding: 2px 0; }
 #selectedCard .facts span:first-child { color: var(--muted); }
+
+/* history row actions */
+.acts { white-space: nowrap; text-align: right; }
+button.mini { background: none; border: 1px solid var(--line, #3a3f4b); color: inherit; border-radius: 6px;
+  cursor: pointer; font-size: 13px; line-height: 1; padding: 4px 7px; margin-left: 4px; }
+button.mini:hover { background: rgba(127, 127, 127, .18); }

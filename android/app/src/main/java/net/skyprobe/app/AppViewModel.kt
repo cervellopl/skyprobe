@@ -19,6 +19,7 @@ import net.skyprobe.app.net.Health
 import net.skyprobe.app.net.JobResult
 import net.skyprobe.app.net.JobSummary
 import net.skyprobe.app.net.SkyProbeApi
+import net.skyprobe.app.net.Upload
 
 const val NOT_CONFIGURED = "not configured"
 
@@ -49,6 +50,7 @@ data class UiState(
     val error: String? = null,
     val job: JobResult? = null,
     val history: List<JobSummary> = emptyList(),
+    val duplicate: Upload? = null,     // the picture is already on the server; ask what to do
 )
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
@@ -56,6 +58,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val _state = MutableStateFlow(UiState(settings = load()))
     val state: StateFlow<UiState> = _state.asStateFlow()
     private var pollJob: Job? = null
+    private var lastObsTime: String? = null
 
     var api = SkyProbeApi(_state.value.settings.server, _state.value.settings.token)
         private set
@@ -149,14 +152,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun analyse(obsTime: String? = null) {
+    fun analyse(obsTime: String? = null, allowDuplicate: Boolean = false) {
         val st = _state.value
         val uri = st.pickedUri ?: return
+        lastObsTime = obsTime
         if (st.settings.server.isBlank()) {
             _state.update { it.copy(error = "Set the server address in settings first") }
             return
         }
-        _state.update { it.copy(busy = true, error = null, job = null, uploadProgress = 0f) }
+        _state.update { it.copy(busy = true, error = null, job = null, uploadProgress = 0f, duplicate = null) }
         viewModelScope.launch {
             val s = st.settings
             val opts = buildMap {
@@ -170,30 +174,68 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 if (!obsTime.isNullOrBlank()) put("obs_time", obsTime)
             }
             runCatching {
-                api.submit(getApplication<Application>().contentResolver, uri, opts) { p ->
+                api.submit(getApplication<Application>().contentResolver, uri, opts, allowDuplicate) { p ->
                     _state.update { it.copy(uploadProgress = p) }
                 }
-            }.onSuccess { id -> watch(id) }
-                .onFailure { e -> _state.update { it.copy(busy = false, error = e.message ?: "upload failed") } }
+            }.onSuccess { up ->
+                if (up.duplicate) _state.update { it.copy(busy = false, duplicate = up) } else watch(up.id)
+            }.onFailure { e -> _state.update { it.copy(busy = false, error = e.message ?: "upload failed") } }
         }
+    }
+
+    /** The user chose to analyse a picture the server already has. */
+    fun analyseAnyway() = analyse(lastObsTime, allowDuplicate = true)
+
+    fun openDuplicate() {
+        val id = _state.value.duplicate?.id ?: return
+        _state.update { it.copy(duplicate = null) }
+        watch(id)
+    }
+
+    fun dismissDuplicate() = _state.update { it.copy(duplicate = null) }
+
+    /** Runs the pipeline again on the copy the server kept - for a job that broke or was interrupted. */
+    fun rerun(id: String) = viewModelScope.launch {
+        pollJob?.cancel()
+        _state.update { it.copy(busy = true, error = null, job = null, uploadProgress = 0f) }
+        runCatching { api.rerun(id) }
+            .onSuccess { watch(id) }
+            .onFailure { e -> _state.update { it.copy(busy = false, error = e.message ?: "could not re-analyse") } }
+    }
+
+    fun deleteJob(id: String, onDone: () -> Unit = {}) = viewModelScope.launch {
+        runCatching { api.deleteJob(id) }
+            .onSuccess {
+                if (_state.value.job?.id == id) clearJob()
+                _state.update { st -> st.copy(history = st.history.filterNot { it.id == id }) }
+                onDone()
+            }
+            .onFailure { e -> _state.update { it.copy(error = e.message ?: "could not delete") } }
     }
 
     fun watch(id: String) {
         pollJob?.cancel()
         pollJob = viewModelScope.launch {
             _state.update { it.copy(busy = true, error = null) }
+            var misses = 0
             while (true) {
                 val r = try {
                     api.job(id)
                 } catch (e: Exception) {
+                    // a vanished job (deleted, pruned) would otherwise be polled for ever
+                    if (++misses >= 5) {
+                        _state.update { it.copy(busy = false, error = e.message ?: "the server does not answer") }
+                        break
+                    }
                     null
                 }
                 if (r == null) {
                     delay(3000)
                     continue
                 }
-                _state.update { it.copy(job = r, busy = !r.done && !r.failed, error = if (r.failed) r.error else null) }
-                if (r.done || r.failed) break
+                misses = 0
+                _state.update { it.copy(job = r, busy = r.running, error = if (r.failed) r.error else null) }
+                if (!r.running) break
                 delay(2000)
             }
         }
@@ -206,7 +248,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearJob() {
         pollJob?.cancel()
-        _state.update { it.copy(job = null, busy = false, error = null, uploadProgress = 0f) }
+        _state.update { it.copy(job = null, busy = false, error = null, uploadProgress = 0f, duplicate = null) }
     }
 
     suspend fun dbStats() = api.dbStats()

@@ -13,6 +13,7 @@ import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import okio.BufferedSink
 import okio.source
 import java.io.IOException
@@ -115,6 +116,7 @@ data class Detections(val count: Int = 0, @SerialName("fwhm_px") val fwhmPx: Dou
 data class JobResult(
     val id: String = "", val status: String = "", val stage: String = "", val progress: Int = 0,
     val filename: String = "", val error: String? = null, val log: List<String> = emptyList(),
+    val interrupted: Boolean = false, val stalled: Boolean = false,
     val warnings: List<String> = emptyList(),
     val file: FileInfo? = null, val time: ObsTime? = null, val meta: Meta? = null,
     val detections: Detections? = null,
@@ -125,6 +127,7 @@ data class JobResult(
 ) {
     val done get() = status == "done"
     val failed get() = status == "failed"
+    val running get() = status == "queued" || status == "running"
     val unidentified get() = candidates.count { it.status == "unidentified" }
 }
 
@@ -134,6 +137,8 @@ data class JobSummary(
     val ra: Double? = null, val dec: Double? = null,
     @SerialName("n_variables") val nVariables: Int = 0,
     @SerialName("n_unidentified") val nUnidentified: Int = 0,
+    @SerialName("can_rerun") val canRerun: Boolean = false,
+    val stalled: Boolean = false, val interrupted: Boolean = false,
 )
 
 @Serializable
@@ -200,8 +205,12 @@ data class LightCurve(val name: String = "", val points: List<CurvePoint> = empt
 /** The server refused to compose a posting (e.g. a non-linear camera response). */
 class BlockedException(message: String) : IOException(message)
 
+/** The server answers an upload of a picture it already holds with the id of that earlier job. */
 @Serializable
-private data class CreateResponse(val id: String = "")
+data class Upload(
+    val id: String = "", val status: String = "", val duplicate: Boolean = false,
+    val filename: String? = null, val created: Double = 0.0, val message: String = "",
+)
 
 // ---------------------------------------------------------------- client
 
@@ -238,6 +247,20 @@ class SkyProbeApi(baseUrl: String, private val token: String? = null) {
             el.toString().let { s -> Regex("\"detail\"\\s*:\\s*\"([^\"]*)\"").find(s)?.groupValues?.get(1) ?: "HTTP $code" }
         }
     } catch (e: Exception) { "HTTP $code" }
+
+    private suspend fun send(url: String, method: String): String = withContext(Dispatchers.IO) {
+        val body = if (method == "POST") "".toRequestBody(null) else null
+        client.newCall(req(url).method(method, body).build()).execute().use { r ->
+            val text = r.body?.string().orEmpty()
+            if (!r.isSuccessful) throw IOException(errorMessage(text, r.code))
+            text
+        }
+    }
+
+    /** Analyses the file the server already has again, under the same job id. */
+    suspend fun rerun(id: String) { send("$base/api/jobs/$id/rerun", "POST") }
+
+    suspend fun deleteJob(id: String) { send("$base/api/jobs/$id?force=true", "DELETE") }
 
     suspend fun health(): Health = get("$base/api/health") { json.decodeFromString(it) }
 
@@ -288,13 +311,14 @@ class SkyProbeApi(baseUrl: String, private val token: String? = null) {
         return get(url) { json.decodeFromString(it) }
     }
 
-    /** Uploads the picked image and returns the new job id. */
+    /** Uploads the picked image; the answer says whether the server already knew it. */
     suspend fun submit(
         resolver: ContentResolver,
         uri: Uri,
         options: Map<String, String>,
+        allowDuplicate: Boolean = false,
         onProgress: (Float) -> Unit = {},
-    ): String = withContext(Dispatchers.IO) {
+    ): Upload = withContext(Dispatchers.IO) {
         val name = displayName(resolver, uri)
         val total = sizeOf(resolver, uri)
         val fileBody = object : RequestBody() {
@@ -319,10 +343,11 @@ class SkyProbeApi(baseUrl: String, private val token: String? = null) {
         val builder = MultipartBody.Builder().setType(MultipartBody.FORM)
             .addFormDataPart("file", name, fileBody)
         options.filterValues { it.isNotBlank() }.forEach { (k, v) -> builder.addFormDataPart(k, v) }
+        builder.addFormDataPart("allow_duplicate", allowDuplicate.toString())
         client.newCall(req("$base/api/jobs").post(builder.build()).build()).execute().use { r ->
             val body = r.body?.string().orEmpty()
             if (!r.isSuccessful) throw IOException(errorMessage(body, r.code))
-            json.decodeFromString<CreateResponse>(body).id
+            json.decodeFromString<Upload>(body)
         }
     }
 

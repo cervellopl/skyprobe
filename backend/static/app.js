@@ -62,6 +62,15 @@ function upload(fd) {
   xhr.onload = () => {
     let r = {}; try { r = JSON.parse(xhr.responseText); } catch { /* ignore */ }
     if (xhr.status >= 300) { showProgress("Upload failed", 0, r.detail || xhr.statusText, true); return; }
+    if (r.duplicate) {
+      const when = r.created ? new Date(r.created * 1000).toLocaleString() : "earlier";
+      if (!confirm(`This image was already analysed (${r.filename || r.id}, ${when}).\n\n`
+                 + `OK opens that analysis, Cancel analyses the picture again.`)) {
+        fd.set("allow_duplicate", "true");
+        upload(fd);
+        return;
+      }
+    }
     location.hash = "job=" + r.id;
     poll(r.id);
   };
@@ -69,12 +78,32 @@ function upload(fd) {
   xhr.send(fd);
 }
 
-function showProgress(stage, pct, log, err) {
+function showProgress(stage, pct, log, err, retryId) {
   $("#progressCard").classList.remove("hidden");
   $("#stage").textContent = stage; $("#stage").classList.toggle("error", !!err);
   $("#pct").textContent = pct ? pct + "%" : ""; $("#barFill").style.width = (pct || 0) + "%";
   $("#log").textContent = log;
   $("#log").scrollTop = 1e9;
+  const btn = $("#btnRetry");
+  btn.classList.toggle("hidden", !retryId);
+  if (retryId) btn.onclick = () => rerun(retryId);
+}
+
+/** Runs the whole pipeline again on the file the server already has. */
+async function rerun(id) {
+  showProgress("Queued…", 0, "");
+  const r = await fetch(`/api/jobs/${id}/rerun`, { method: "POST" });
+  if (!r.ok) { showProgress("Cannot re-analyse", 0, (await r.json()).detail || r.statusText, true); return; }
+  location.hash = "job=" + id;
+  poll(id);
+}
+
+async function removeJob(id, name) {
+  if (!confirm(`Delete the analysis of ${name || id}? Its measurements leave the database too.`)) return false;
+  const r = await fetch(`/api/jobs/${id}?force=true`, { method: "DELETE" });
+  if (!r.ok) { alert((await r.json()).detail || r.statusText); return false; }
+  if (location.hash.includes(id)) { location.hash = ""; $("#results").classList.add("hidden"); $("#progressCard").classList.add("hidden"); }
+  return true;
 }
 
 async function poll(id) {
@@ -83,7 +112,7 @@ async function poll(id) {
   try { r = await (await fetch(`/api/jobs/${id}`)).json(); } catch { pollTimer = setTimeout(() => poll(id), 3000); return; }
   if (r.detail) { showProgress("Unknown job", 0, r.detail, true); return; }
   const log = (r.log || []).join("\n");
-  if (r.status === "failed") { showProgress("Failed: " + (r.error || ""), 0, log, true); return; }
+  if (r.status === "failed") { showProgress("Failed: " + (r.error || ""), 0, log, true, id); return; }
   if (r.status !== "done") { showProgress(cap(r.stage || r.status) + "…", r.progress, log); pollTimer = setTimeout(() => poll(id), 1500); return; }
   $("#progressCard").classList.add("hidden");
   render(r);
@@ -377,10 +406,20 @@ function focusOn(o) {
 $("#btnHistory").onclick = async () => {
   const list = await (await fetch("/api/jobs")).json();
   $("#historyCard").classList.remove("hidden");
-  $("#history").innerHTML = list.length ? `<div class="tbl"><table><thead><tr><th>File</th><th>Status</th><th>Centre</th><th>Variables</th><th>New?</th><th>Date</th></tr></thead><tbody>${list.map((j) => `
-    <tr data-id="${esc(j.id)}"><td>${esc(j.filename)}</td><td>${esc(j.status)}</td><td>${j.ra != null ? fmt(j.ra, 3) + " " + fmt(j.dec, 3) : "–"}</td>
-    <td>${j.n_variables}</td><td>${j.n_unidentified ? `<span class="badge b-red">${j.n_unidentified}</span>` : "0"}</td><td>${new Date(j.created * 1000).toLocaleString()}</td></tr>`).join("")}</tbody></table></div>` : `<p class="empty">No analyses yet.</p>`;
-  $("#history").querySelectorAll("tr[data-id]").forEach((tr) => tr.onclick = () => { $("#historyCard").classList.add("hidden"); location.hash = "job=" + tr.dataset.id; poll(tr.dataset.id); });
+  $("#history").innerHTML = list.length ? `<div class="tbl"><table><thead><tr><th>File</th><th>Status</th><th>Centre</th><th>Variables</th><th>New?</th><th>Date</th><th></th></tr></thead><tbody>${list.map((j) => `
+    <tr data-id="${esc(j.id)}"><td class="open">${esc(j.filename)}</td><td class="open">${esc(j.status)}${j.interrupted ? ' <span class="badge b-red">interrupted</span>' : ""}${j.stalled ? ' <span class="badge b-red">stalled</span>' : ""}</td><td class="open">${j.ra != null ? fmt(j.ra, 3) + " " + fmt(j.dec, 3) : "–"}</td>
+    <td class="open">${j.n_variables}</td><td class="open">${j.n_unidentified ? `<span class="badge b-red">${j.n_unidentified}</span>` : "0"}</td><td class="open">${new Date(j.created * 1000).toLocaleString()}</td>
+    <td class="acts">${j.can_rerun ? `<button class="mini" data-act="rerun" title="Analyse again">↻</button>` : ""}<button class="mini" data-act="del" title="Delete">🗑</button></td></tr>`).join("")}</tbody></table></div>` : `<p class="empty">No analyses yet.</p>`;
+  $("#history").querySelectorAll("tr[data-id] td.open").forEach((td) => td.onclick = () => {
+    const id = td.parentElement.dataset.id;
+    $("#historyCard").classList.add("hidden"); location.hash = "job=" + id; poll(id);
+  });
+  $("#history").querySelectorAll("button[data-act]").forEach((b) => b.onclick = async (e) => {
+    e.stopPropagation();
+    const tr = b.closest("tr"), id = tr.dataset.id, name = tr.firstElementChild.textContent;
+    if (b.dataset.act === "rerun") { $("#historyCard").classList.add("hidden"); rerun(id); }
+    else if (await removeJob(id, name)) tr.remove();
+  });
   $("#historyCard").scrollIntoView({ behavior: "smooth" });
 };
 $("#closeHistory").onclick = () => $("#historyCard").classList.add("hidden");
