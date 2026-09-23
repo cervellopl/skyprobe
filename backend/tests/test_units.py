@@ -427,3 +427,21 @@ def test_duplicate_upload_finds_the_earlier_job(tmp_path, monkeypatch):
     assert main._find_duplicate(digest, skip=old) is None           # the only copy is the one we skipped
     # the digest is cached in result.json so the next scan does not read the image again
     assert _json.loads((tmp_path / old / "result.json").read_text())["file_hash"] == digest
+
+
+def test_results_never_carry_nan_into_json(tmp_path, monkeypatch):
+    """A NaN anywhere in a result used to make every later read of that job a 500."""
+    import json as _json
+    from app import main
+
+    monkeypatch.setattr(main, "JOBS_DIR", tmp_path)
+    assert main._dumps({"a": float("nan"), "b": [float("inf"), 1.5]}) == '{"a": null, "b": [null, 1.5]}'
+
+    # a result written before this fix still holds a bare NaN token
+    job_id = "f" * 16
+    (tmp_path / job_id).mkdir()
+    (tmp_path / job_id / "result.json").write_text(
+        '{"id": "%s", "status": "done", "variables": [{"name": "SS Cyg", "airmass": NaN}]}' % job_id)
+    r = main._load(job_id)
+    assert r["variables"][0]["airmass"] is None
+    _json.dumps(r, allow_nan=False)      # what the API does; used to raise

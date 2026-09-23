@@ -363,13 +363,14 @@ def _airmass_fn(opts, meta, tobs):
 
     def fn(coord):
         try:
-            alt = coord.transform_to(frame).alt.deg
-            if alt <= 1:
+            alt = float(coord.transform_to(frame).alt.deg)
+            if not math.isfinite(alt) or alt <= 1:
                 return None
             z = math.radians(90 - alt)
             sec = 1 / math.cos(z)
             # Hardie (1962)
-            return float(sec - 0.0018167 * (sec - 1) - 0.002875 * (sec - 1) ** 2 - 0.0008083 * (sec - 1) ** 3)
+            am = sec - 0.0018167 * (sec - 1) - 0.002875 * (sec - 1) ** 2 - 0.0008083 * (sec - 1) ** 3
+            return float(am) if math.isfinite(am) else None
         except Exception:
             return None
 

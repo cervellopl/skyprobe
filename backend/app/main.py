@@ -19,6 +19,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 import os
 import re
 import secrets
@@ -82,8 +83,27 @@ class Job:
         self.result["updated"] = time.time()
         with self.lock:
             tmp = self.dir / "result.json.tmp"
-            tmp.write_text(json.dumps(self.result, default=_json_default))
+            tmp.write_text(_dumps(self.result))
             tmp.replace(self.dir / "result.json")
+
+
+def _dumps(result: dict) -> str:
+    """JSON without NaN or Infinity.
+
+    Those are legal in Python's json but not in JSON itself, and a single one anywhere in a
+    result made every later read of that job fail with a 500.
+    """
+    return json.dumps(_finite(result), default=_json_default, allow_nan=False)
+
+
+def _finite(o):
+    if isinstance(o, float):
+        return o if math.isfinite(o) else None
+    if isinstance(o, dict):
+        return {k: _finite(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_finite(v) for v in o]
+    return o
 
 
 def _json_default(o):
@@ -133,7 +153,7 @@ def _read(path: Path) -> dict:
     """result.json is rewritten in place while a job runs, so a half-written read is possible."""
     for _ in range(3):
         try:
-            return json.loads(path.read_text())
+            return _finite(json.loads(path.read_text()))
         except json.JSONDecodeError:
             time.sleep(0.05)
     raise HTTPException(503, "busy")
@@ -142,7 +162,7 @@ def _read(path: Path) -> dict:
 def _write(job_id: str, result: dict) -> None:
     with Job.lock:
         tmp = JOBS_DIR / job_id / "result.json.tmp"
-        tmp.write_text(json.dumps(result, default=_json_default))
+        tmp.write_text(_dumps(result))
         tmp.replace(JOBS_DIR / job_id / "result.json")
 
 
@@ -340,7 +360,7 @@ def list_jobs(limit: int = 30):
     dirs = sorted((d for d in JOBS_DIR.iterdir() if d.is_dir()), key=lambda d: d.stat().st_mtime, reverse=True)
     for d in dirs[:limit]:
         try:
-            r = _check_alive(json.loads((d / "result.json").read_text()))
+            r = _check_alive(_read(d / "result.json"))
         except Exception:
             continue
         s = r.get("solution") or {}
