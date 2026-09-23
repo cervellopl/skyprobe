@@ -143,6 +143,7 @@ Interactive docs (OpenAPI) at `/docs`. Set `API_TOKEN` to require `X-API-Key` on
 | `GET` | `/api/jobs/{id}/photometry.csv`, `/candidates.csv` | tables |
 | `GET` | `/api/jobs/{id}/aavso.txt` | AAVSO Extended Format report |
 | `GET` | `/api/jobs/{id}/cutout.jpg?x=&y=` | close-up of one object (`&source=original` for full resolution) |
+| `GET` | `/api/jobs/{id}/dss.jpg?x=&y=[&survey=]` | the same patch of sky from a survey, on our pixel grid |
 | `GET` | `/api/jobs/{id}/report.pdf` | printable PDF report (image, astrometry, calibration, tables) |
 | `GET` | `/api/jobs/{id}/vsnet` | composed vsnet-obs posting (`?plain=true` for text) |
 
@@ -156,6 +157,17 @@ Interactive docs (OpenAPI) at `/docs`. Set `API_TOKEN` to require `X-API-Key` on
 `aperture`, `annulus_in`, `annulus_out` (radii in FWHM; default 1.4 and a sky annulus
 derived from the seeing) · `snr_min` (minimum SNR of a new-object candidate, default 7) ·
 `allow_duplicate` (`true` to analyse a picture the server already holds a second time).
+
+### Blinking a candidate against a survey
+
+`dss.jpg` renders the same piece of sky as `cutout.jpg` from a HiPS survey through the CDS
+`hips2fits` service and **resamples it onto our own pixel grid**: same centre, same scale,
+same rotation and the same handedness, so the two images can be blinked without anything
+shifting. A real new object stays put while the background stars line up; a plate flaw or a
+hot pixel does not. Surveys: DSS2 colour/red/blue/near-IR (1990s plates), Pan-STARRS DR1,
+SDSS DR9 and 2MASS; `/api/health` lists them. The web page and
+the Android close-up both offer *Image / Survey / Blink*, and the renderings are cached per
+job, so a second look is instant.
 
 ### Tuning the measurement
 

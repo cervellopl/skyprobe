@@ -7,12 +7,13 @@ const store = {
   set(k, v) { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch { /* private mode */ } },
 };
 const COLORS = { unidentified: "#ff5a5f", known: "#ffd23f", variable: "#5cd0ff", limit: "#8b97b0", minor: "#ffa94d", minorMiss: "#9c7a55" };
-let job = null, pollTimer = null, view = { z: 1, x: 0, y: 0 }, selected = null;
+let job = null, health = {}, pollTimer = null, view = { z: 1, x: 0, y: 0 }, selected = null;
 let display = { brightness: Number(store.get("sp_bright")) || 1, contrast: Number(store.get("sp_contrast")) || 1 };
 let cutoutSource = store.get("sp_cutsrc") || "preview";
 
 // ---------------------------------------------------------------- server status
 fetch("/api/health").then((r) => r.json()).then((h) => {
+  health = h;
   const s = $("#serverStatus");
   const solvers = [h.local_solver && "local", h.remote_solver_key_configured && "nova"].filter(Boolean);
   s.textContent = solvers.length ? `solver: ${solvers.join(" + ")}` : "no solver – add API key";
@@ -133,6 +134,7 @@ function render(r) {
   $("#dlAavso").classList.toggle("hidden", !r.time);
   $("#btnVsnet").classList.toggle("hidden", !r.time);
   const img = $("#img");
+  stopBlink();
   $("#selectedCard").classList.add("hidden");
   img.onload = () => { $("#overlay").setAttribute("viewBox", `0 0 ${img.naturalWidth} ${img.naturalHeight}`);
     applyDisplay();
@@ -349,12 +351,24 @@ $("#bright")?.addEventListener("input", (e) => { display.brightness = +e.target.
 $("#contrast")?.addEventListener("input", (e) => { display.contrast = +e.target.value; applyDisplay(); });
 $("#bcReset")?.addEventListener("click", () => { display = { brightness: 1, contrast: 1 }; applyDisplay(); });
 
+// blink comparison: our close-up against the same patch of sky from a survey
+let compare = { survey: store.get("sp_survey") || "dss2", mode: "image", timer: null };
+function stopBlink() { clearInterval(compare.timer); compare.timer = null; }
+
+function surveyOptions() {
+  const list = (health.surveys || [{ id: "dss2", label: "DSS2 colour" }]);
+  return list.map((s) => `<option value="${esc(s.id)}"${s.id === compare.survey ? " selected" : ""}>${esc(s.label)}</option>`).join("");
+}
+
 // close-up of whatever is selected, cut from the preview on the server
 function showSelected(key) {
+  stopBlink();
   const o = lookup(key), card = $("#selectedCard");
   if (!o) { card.classList.add("hidden"); return; }
-  const url = `/api/jobs/${job.id}/cutout.jpg?x=${o.x.toFixed(1)}&y=${o.y.toFixed(1)}` +
-    `&size=90&zoom=4&source=${cutoutSource}&brightness=${display.brightness}&contrast=${display.contrast}`;
+  const geom = `x=${o.x.toFixed(1)}&y=${o.y.toFixed(1)}&size=90&zoom=4`;
+  const url = `/api/jobs/${job.id}/cutout.jpg?${geom}` +
+    `&source=${cutoutSource}&brightness=${display.brightness}&contrast=${display.contrast}`;
+  const dssUrl = `/api/jobs/${job.id}/dss.jpg?${geom}&survey=${encodeURIComponent(compare.survey)}`;
   const title = key[0] === "v" ? o.name : key[0] === "m" ? o.name : o.label;
   const m = job.meta || {};
   const shot = [m.exptime != null ? `${fmt(m.exptime, m.exptime < 10 ? 2 : 1)} s` : null,
@@ -379,14 +393,47 @@ function showSelected(key) {
     <label class="check small" style="margin-top:8px"><input type="checkbox" id="selFull"
       ${cutoutSource === "original" ? "checked" : ""}> full resolution
       <span class="muted">(first one decodes the original)</span></label>
+    ${job.solution ? `<div class="compare">
+      <div class="seg"><button data-mode="image">Image</button><button data-mode="survey">Survey</button><button data-mode="blink">Blink</button></div>
+      <select id="selSurvey">${surveyOptions()}</select>
+      <span class="muted small" id="selShowing"></span>
+    </div>` : ""}
     <div class="links"><a class="btn small" target="_blank" rel="noopener" href="${aladin(o.ra, o.dec)}">Aladin</a>
       ${key[0] === "v" ? `<a class="btn small" target="_blank" rel="noopener" href="${esc(o.vsx_url)}">VSX</a>` : ""}</div>`;
-  $("#selClose").onclick = () => { selected = null; card.classList.add("hidden"); drawOverlay(); };
+  $("#selClose").onclick = () => { stopBlink(); selected = null; card.classList.add("hidden"); drawOverlay(); };
   $("#selFull").onchange = (e) => {
     cutoutSource = e.target.checked ? "original" : "preview";
     store.set("sp_cutsrc", cutoutSource);
     showSelected(key);
   };
+
+  const img = card.querySelector("img"), label = $("#selShowing");
+  if (!job.solution) return;
+  new Image().src = dssUrl;      // warm the server-side cache while the user reads the facts
+  const show = (which) => {
+    img.src = which === "survey" ? dssUrl : url;
+    if (label) label.textContent = which === "survey"
+      ? $("#selSurvey").selectedOptions[0].textContent : "your image";
+  };
+  const setMode = (mode) => {
+    stopBlink();
+    compare.mode = mode;
+    card.querySelectorAll(".seg button").forEach((b) => b.classList.toggle("on", b.dataset.mode === mode));
+    if (mode === "blink") {
+      let on = false;
+      show("image");
+      compare.timer = setInterval(() => { on = !on; show(on ? "survey" : "image"); }, 900);
+    } else {
+      show(mode);
+    }
+  };
+  card.querySelectorAll(".seg button").forEach((b) => b.onclick = () => setMode(b.dataset.mode));
+  $("#selSurvey").onchange = (e) => {
+    compare.survey = e.target.value;
+    store.set("sp_survey", compare.survey);
+    showSelected(key);
+  };
+  setMode(compare.mode);
 }
 
 function select(key) {

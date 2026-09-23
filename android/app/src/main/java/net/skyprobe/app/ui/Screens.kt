@@ -27,6 +27,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
@@ -51,6 +52,7 @@ import net.skyprobe.app.NOT_CONFIGURED
 import net.skyprobe.app.Phone
 import net.skyprobe.app.UiState
 import net.skyprobe.app.net.Candidate
+import net.skyprobe.app.net.Survey
 import net.skyprobe.app.net.JobResult
 import net.skyprobe.app.net.MinorBody
 import net.skyprobe.app.net.Variable
@@ -264,7 +266,8 @@ private fun ResultScreen(job: JobResult, vm: AppViewModel) {
     var candSort by remember { mutableStateOf(CandSort.BRIGHT) }
     var newOnly by remember { mutableStateOf(false) }
     val uri = LocalUriHandler.current
-    val thumbs = Thumbs(vm, job.id, brightness, contrast, exposureLine(job))
+    val thumbs = Thumbs(vm, job.id, brightness, contrast, exposureLine(job),
+        solved = job.solution != null, surveys = vm.state.collectAsState().value.health?.surveys.orEmpty())
 
     val variables = remember(job, query, varSort, measuredOnly, unflaggedOnly) {
         job.variables
@@ -604,12 +607,21 @@ private fun DisplayRow(brightness: Float, contrast: Float, onBrightness: (Float)
 
 /** Builds close-up URLs that follow the current brightness and contrast. */
 private class Thumbs(val vm: AppViewModel, val jobId: String, val brightness: Float, val contrast: Float,
-                     val exposure: String = "") {
+                     val exposure: String = "", val solved: Boolean = true,
+                     val surveys: List<Survey> = emptyList()) {
     fun url(x: Double, y: Double, size: Int = 90, zoom: Int = 4, original: Boolean = false) =
         vm.api.fileUrl(jobId, "cutout.jpg") +
             "?x=$x&y=$y&size=$size&zoom=$zoom&brightness=$brightness&contrast=$contrast" +
             (if (original) "&source=original" else "")
+
+    /** The same patch of sky from a survey, on our pixel grid - for blinking against it. */
+    fun surveyUrl(x: Double, y: Double, survey: String, size: Int = 90, zoom: Int = 4) =
+        vm.api.fileUrl(jobId, "dss.jpg") + "?x=$x&y=$y&size=$size&zoom=$zoom&survey=$survey"
+
+    fun surveyLabel(id: String) = surveys.firstOrNull { it.id == id }?.label ?: id.uppercase()
 }
+
+private enum class Compare { IMAGE, SURVEY, BLINK }
 
 /**
  * The close-up, with a switch to the original resolution. The preview is instant; the
@@ -625,11 +637,34 @@ private fun exposureLine(job: JobResult): String = listOfNotNull(
 @Composable
 private fun Thumb(thumbs: Thumbs, x: Double, y: Double, label: String) {
     var original by remember { mutableStateOf(false) }
+    var mode by remember { mutableStateOf(Compare.IMAGE) }
+    var onSurvey by remember { mutableStateOf(false) }
+    val survey = thumbs.vm.state.collectAsState().value.settings.survey
+    LaunchedEffect(mode) {
+        if (mode != Compare.BLINK) { onSurvey = mode == Compare.SURVEY; return@LaunchedEffect }
+        while (true) { onSurvey = !onSurvey; kotlinx.coroutines.delay(900) }
+    }
     Column {
-        AsyncImage(
-            model = thumbs.url(x, y, original = original), contentDescription = "Close-up of $label",
-            modifier = Modifier.fillMaxWidth().height(180.dp).clip(RoundedCornerShape(8.dp)).background(Color.Black),
-        )
+        Box(Modifier.fillMaxWidth().height(180.dp).clip(RoundedCornerShape(8.dp)).background(Color.Black)) {
+            // both images are kept loaded, so blinking does not flash an empty frame
+            AsyncImage(
+                model = thumbs.url(x, y, original = original), contentDescription = "Close-up of $label",
+                modifier = Modifier.fillMaxSize().alpha(if (onSurvey) 0f else 1f),
+            )
+            if (thumbs.solved && mode != Compare.IMAGE) {
+                AsyncImage(
+                    model = thumbs.surveyUrl(x, y, survey),
+                    contentDescription = "${thumbs.surveyLabel(survey)} image of the same field",
+                    modifier = Modifier.fillMaxSize().alpha(if (onSurvey) 1f else 0f),
+                )
+            }
+            Text(if (onSurvey) thumbs.surveyLabel(survey) else "your image",
+                style = MaterialTheme.typography.labelSmall, color = Color.White,
+                modifier = Modifier.align(Alignment.BottomStart)
+                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(topEnd = 6.dp))
+                    .padding(horizontal = 6.dp, vertical = 2.dp))
+        }
+        if (thumbs.solved) SurveyRow(thumbs, mode) { mode = it }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(original, { original = it })
             Text(if (original) "full resolution" else "preview (tap for full resolution)",
@@ -639,6 +674,38 @@ private fun Thumb(thumbs: Thumbs, x: Double, y: Double, label: String) {
                 Spacer(Modifier.weight(1f))
                 Text(thumbs.exposure, style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+/**
+ * Image / survey / blink, plus which survey to blink against. Blinking is how an observer
+ * tells a real new object from a plate flaw: the background stays put, the object does not.
+ */
+@Composable
+private fun SurveyRow(thumbs: Thumbs, mode: Compare, onMode: (Compare) -> Unit) {
+    var menu by remember { mutableStateOf(false) }
+    val survey = thumbs.vm.state.collectAsState().value.settings.survey
+    Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Compare.entries.forEach { m ->
+            FilterChip(selected = mode == m, onClick = { onMode(m) },
+                label = { Text(m.name.lowercase().replaceFirstChar { it.uppercase() },
+                    style = MaterialTheme.typography.labelSmall) })
+        }
+        Spacer(Modifier.weight(1f))
+        Box {
+            TextButton(onClick = { menu = true }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                Text(thumbs.surveyLabel(survey), style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                Icon(Icons.Default.ArrowDropDown, null, Modifier.size(16.dp))
+            }
+            DropdownMenu(menu, onDismissRequest = { menu = false }) {
+                val list = thumbs.surveys.ifEmpty { listOf(Survey("dss2", "DSS2 colour")) }
+                list.forEach { s ->
+                    DropdownMenuItem(text = { Text(s.label) },
+                        onClick = { thumbs.vm.update { it.copy(survey = s.id) }; menu = false })
+                }
             }
         }
     }

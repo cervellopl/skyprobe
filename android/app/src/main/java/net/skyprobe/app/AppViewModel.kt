@@ -40,6 +40,7 @@ data class Settings(
     val annulusIn: String = "",
     val annulusOut: String = "",
     val snrMin: String = "",           // minimum SNR for a new-object candidate
+    val survey: String = "dss2",       // survey the close-up is blinked against
     val photometry: Boolean = true,
     val transients: Boolean = true,
 )
@@ -88,6 +89,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         annulusIn = prefs.getString("annulusIn", "") ?: "",
         annulusOut = prefs.getString("annulusOut", "") ?: "",
         snrMin = prefs.getString("snrMin", "") ?: "",
+        survey = prefs.getString("survey", "dss2") ?: "dss2",
         photometry = prefs.getBoolean("photometry", true),
         transients = prefs.getBoolean("transients", true),
     )
@@ -103,6 +105,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             putBoolean("forceVsnet", s.forceVsnet)
             putString("aperture", s.aperture); putString("annulusIn", s.annulusIn)
             putString("annulusOut", s.annulusOut); putString("snrMin", s.snrMin)
+            putString("survey", s.survey)
         }.apply()
         val serverChanged = s.server != _state.value.settings.server || s.token != _state.value.settings.token
         _state.update { it.copy(settings = s) }

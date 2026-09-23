@@ -5,6 +5,7 @@ GET  /api/jobs            recent jobs
 GET  /api/jobs/{id}       status + full results (poll until status is done/failed)
 GET  /api/jobs/{id}/preview.jpg | annotated.jpg | wcs.fits | solution.wcs | aavso.txt | photometry.csv | candidates.csv
 GET  /api/jobs/{id}/cutout.jpg?x=&y=[&source=original]  close-up of one object
+GET  /api/jobs/{id}/dss.jpg?x=&y=[&survey=]   the same patch of sky from a survey (blink comparison)
 GET  /api/jobs/{id}/report.pdf    printable PDF report
 GET  /api/jobs/{id}/vsnet         composed vsnet-obs posting (JSON, or text with ?plain=true)
 POST /api/jobs/{id}/rerun     analyse the same file again (same job id)
@@ -36,7 +37,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import astrometry, db, pipeline, report as report_mod, vsnet
+import urllib.error
+
+import numpy as np
+
+from . import astrometry, db, dss, pipeline, report as report_mod, vsnet
 from .imageio import DEVICE_PRESETS, FITS_EXT, JPEG_EXT, RAW_EXT
 
 VERSION = "1.0.0"
@@ -281,6 +286,7 @@ def health():
             "remote_solver_key_configured": bool(os.environ.get("ASTROMETRY_API_KEY")),
             "auth_required": bool(API_TOKEN), "max_upload_mb": MAX_UPLOAD_MB,
             "formats": sorted(e.lstrip(".") for e in ALLOWED_EXT),
+            "surveys": dss.survey_list(),
             "devices": {"auto": "Auto-detect", "phone": "Phone camera",
                         **{k: v["label"] for k, v in DEVICE_PRESETS.items()}}}
 
@@ -484,6 +490,19 @@ def _fullres(job_id: str) -> Path:
     return path
 
 
+def _crosshair(im) -> None:
+    """The same marker on our close-up and on the survey, so blinking has a fixed point."""
+    from PIL import ImageDraw
+
+    d = ImageDraw.Draw(im)
+    c, radius, gap = im.width / 2, im.width / 6, im.width / 14
+    d.ellipse([c - radius, c - radius, c + radius, c + radius], outline=(255, 90, 90), width=2)
+    for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):      # crosshair ticks, centre left clear
+        d.line([c + dx * (radius + gap), c + dy * (radius + gap),
+                c + dx * (radius + gap * 2.4), c + dy * (radius + gap * 2.4)],
+               fill=(255, 90, 90), width=2)
+
+
 @app.get("/api/jobs/{job_id}/cutout.jpg", dependencies=[Depends(auth)])
 def job_cutout(job_id: str, x: float, y: float, size: int = 80, zoom: int = 4, mark: bool = True,
                brightness: float = 1.0, contrast: float = 1.0, source: str = "preview"):
@@ -524,17 +543,55 @@ def job_cutout(job_id: str, x: float, y: float, size: int = 80, zoom: int = 4, m
     target = max(32, min(int(round(size * zoom)), 1600))
     crop = crop.resize((target, target), Image.LANCZOS)
     if mark:
-        d = ImageDraw.Draw(crop)
-        c, radius, gap = crop.width / 2, crop.width / 6, crop.width / 14
-        d.ellipse([c - radius, c - radius, c + radius, c + radius], outline=(255, 90, 90), width=2)
-        for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):      # crosshair ticks, centre left clear
-            d.line([c + dx * (radius + gap), c + dy * (radius + gap),
-                    c + dx * (radius + gap * 2.4), c + dy * (radius + gap * 2.4)],
-                   fill=(255, 90, 90), width=2)
+        _crosshair(crop)
     buf = io.BytesIO()
     crop.save(buf, "JPEG", quality=88)
     return Response(buf.getvalue(), media_type="image/jpeg",
                     headers={"Cache-Control": "public, max-age=3600"})
+
+
+@app.get("/api/jobs/{job_id}/dss.jpg", dependencies=[Depends(auth)])
+def job_dss(job_id: str, x: float, y: float, size: int = 80, zoom: int = 4, mark: bool = True,
+            brightness: float = 1.0, contrast: float = 1.0, survey: str = dss.DEFAULT_SURVEY):
+    """The same piece of sky as /cutout.jpg, but from a survey - for blinking the two.
+
+    The survey is resampled onto our own pixel grid, so centre, scale, rotation and parity
+    match and an object that is only on our image stands still while the background does not.
+    """
+    from PIL import Image, ImageEnhance
+
+    _load(job_id)
+    wcs_path = JOBS_DIR / job_id / "wcs.fits"
+    if not wcs_path.exists():
+        raise HTTPException(409, "this image has no astrometric solution, so no survey can be matched")
+    if survey not in dss.SURVEYS:
+        raise HTTPException(400, f"unknown survey '{survey}'")
+    size = max(16, min(size, 1200))
+    zoom = max(1, min(zoom, 12))
+    target = max(32, min(int(round(size * zoom)), 1600))
+
+    from astropy.io import fits as _fits
+    from astropy.wcs import WCS
+
+    wcs = WCS(_fits.getheader(wcs_path)).celestial
+    try:
+        arr = dss.aligned_cutout(wcs, x, y, float(size), target, survey,
+                                 cache=JOBS_DIR / job_id / "dss")
+    except urllib.error.URLError as e:
+        raise HTTPException(504, f"the survey service did not answer: {e.reason}")
+    except Exception as e:
+        raise HTTPException(502, f"could not fetch the survey image: {e}")
+
+    im = Image.fromarray(arr)
+    if abs(brightness - 1.0) > 0.01:
+        im = ImageEnhance.Brightness(im).enhance(brightness)
+    if abs(contrast - 1.0) > 0.01:
+        im = ImageEnhance.Contrast(im).enhance(contrast)
+    if mark:
+        _crosshair(im)
+    return Response(dss.jpeg(np.asarray(im)), media_type="image/jpeg",
+                    headers={"Cache-Control": "public, max-age=86400",
+                             "X-Survey": dss.SURVEYS[survey][1]})
 
 
 @app.get("/api/db/stats", dependencies=[Depends(auth)])

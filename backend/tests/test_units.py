@@ -457,3 +457,37 @@ def test_aperture_settings_are_honoured_and_ordered():
     # a sky annulus set inside the aperture is pushed back out instead of poisoning the sky
     r, r_in, r_out = aperture_radii(fwhm, Apertures(2.0, 0.5, 0.6))
     assert r_in > r and r_out > r_in
+
+
+def test_survey_cutout_lands_on_our_pixel_grid(tmp_path, monkeypatch):
+    """The survey image must be resampled onto our own grid, rotation and parity included."""
+    import numpy as _np
+    from astropy.wcs import WCS as _WCS
+
+    from app import dss
+
+    # our frame: 1"/px, rotated 30 deg, flipped parity
+    ours = _WCS(naxis=2)
+    ours.wcs.crpix = [50, 50]
+    ours.wcs.crval = [150.0, 20.0]
+    ours.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    a = _np.radians(30.0)
+    ours.wcs.cd = _np.array([[_np.cos(a), -_np.sin(a)], [_np.sin(a), _np.cos(a)]]) * (1 / 3600) * _np.array([[1], [1]])
+
+    # the "survey": north up, east left, 0.5"/px, with one bright pixel at a known sky position
+    surv = _WCS(naxis=2)
+    surv.wcs.crpix = [100, 100]
+    surv.wcs.crval = [150.0, 20.0]
+    surv.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    surv.wcs.cdelt = [-0.5 / 3600, 0.5 / 3600]
+    plane = _np.zeros((200, 200), _np.float32)
+    mark_ra, mark_dec = ours.all_pix2world([[56.0, 50.0]], 0)[0]      # 6 px east-ish of centre
+    mx, my = surv.all_world2pix([[mark_ra, mark_dec]], 0)[0]
+    plane[int(round(my)), int(round(mx))] = 255.0
+
+    monkeypatch.setattr(dss, "_fetch", lambda *a, **k: (plane, surv))
+    out = dss.aligned_cutout(ours, 50.0, 50.0, 20.0, 40, cache=tmp_path)
+    assert out.shape == (40, 40, 3)
+    # 20 original px across 40 output px: 6 px along +x of our frame -> 12 output px, same row
+    j, i = _np.unravel_index(_np.argmax(out[:, :, 0]), out.shape[:2])
+    assert abs(i - (20 + 12)) < 3 and abs(j - 20) < 3, (i, j)

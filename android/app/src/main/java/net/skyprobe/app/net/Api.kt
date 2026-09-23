@@ -22,6 +22,9 @@ import java.util.concurrent.TimeUnit
 // ---------------------------------------------------------------- models (server JSON)
 
 @Serializable
+data class Survey(val id: String = "", val label: String = "")
+
+@Serializable
 data class Health(
     val status: String = "",
     val version: String = "",
@@ -30,6 +33,7 @@ data class Health(
     @SerialName("auth_required") val authRequired: Boolean = false,
     @SerialName("max_upload_mb") val maxUploadMb: Int = 0,
     val formats: List<String> = emptyList(),
+    val surveys: List<Survey> = emptyList(),
 )
 
 @Serializable

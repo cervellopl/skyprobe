@@ -117,3 +117,11 @@ dialog textarea { width: 100%; background: var(--panel2); color: var(--text); bo
 button.mini { background: none; border: 1px solid var(--line, #3a3f4b); color: inherit; border-radius: 6px;
   cursor: pointer; font-size: 13px; line-height: 1; padding: 4px 7px; margin-left: 4px; }
 button.mini:hover { background: rgba(127, 127, 127, .18); }
+
+/* blink comparison in the close-up card */
+.compare { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.seg { display: inline-flex; border: 1px solid var(--line, #3a3f4b); border-radius: 8px; overflow: hidden; }
+.seg button { background: none; border: 0; color: inherit; cursor: pointer; font-size: 13px; padding: 5px 10px; }
+.seg button + button { border-left: 1px solid var(--line, #3a3f4b); }
+.seg button.on { background: rgba(108, 168, 255, .22); font-weight: 600; }
+.compare select { font-size: 13px; padding: 4px 6px; }
