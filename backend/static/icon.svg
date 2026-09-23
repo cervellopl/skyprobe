@@ -1,1 +1,29 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#0b1630"/><circle cx="32" cy="32" r="17" fill="none" stroke="#6aa8ff" stroke-width="3"/><path d="M32 8v10M32 46v10M8 32h10M46 32h10" stroke="#6aa8ff" stroke-width="3" stroke-linecap="round"/><circle cx="32" cy="32" r="4" fill="#ffd23f"/><circle cx="44" cy="20" r="2" fill="#e6ebf5"/><circle cx="21" cy="42" r="1.5" fill="#e6ebf5"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="108" height="108">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0A1026"/>
+      <stop offset="0.55" stop-color="#16205A"/>
+      <stop offset="1" stop-color="#2E2A7C"/>
+    </linearGradient>
+    <linearGradient id="orbit" x1="0.1" y1="0.1" x2="0.9" y2="0.9">
+      <stop offset="0" stop-color="#5AC8FA"/>
+      <stop offset="1" stop-color="#9B7BFF"/>
+    </linearGradient>
+    <linearGradient id="star" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0" stop-color="#FFF2B8"/>
+      <stop offset="0.5" stop-color="#FFD23F"/>
+      <stop offset="1" stop-color="#FF9A3C"/>
+    </linearGradient>
+  </defs>
+  <rect width="108" height="108" rx="24" fill="url(#sky)"/>
+  <title>SkyProbe</title>
+  <g transform="rotate(-25 54 54)">
+    <ellipse cx="54" cy="54" rx="31" ry="12.5" fill="none" stroke="url(#orbit)" stroke-width="5"/>
+  </g>
+  <path d="M54,33 Q56.55,50.85 71,54 Q56.55,57.15 54,75 Q51.45,57.15 37,54 Q51.45,50.85 54,33 Z" fill="url(#star)"/>
+  <circle cx="74" cy="36.8" r="5" fill="#0A1026"/>
+  <circle cx="74" cy="36.8" r="3.6" fill="#7DF9FF"/>
+  <path d="M36,65.5 Q36.75,71.025 41,72 Q36.75,72.975 36,78.5 Q35.25,72.975 31,72 Q35.25,71.025 36,65.5 Z" fill="#E6ECFF"/>
+  <circle cx="70" cy="72" r="2" fill="#E6ECFF"/>
+  <circle cx="36" cy="34" r="1.6" fill="#E6ECFF"/>
+</svg>

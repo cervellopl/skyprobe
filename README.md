@@ -70,6 +70,7 @@ architecture-independent, and the one x86-64 binary, `aapt2`, runs under qemu:
 
 ```bash
 sudo apt install qemu-user-static binfmt-support
+# without QEMU_LD_PREFIX aapt2 fails with "Daemon startup failed" as soon as a resource changes
 # minimal amd64 sysroot for aapt2 (libc6, libstdc++6, zlib1g, libgcc-s1 .debs, extracted)
 export QEMU_LD_PREFIX=/path/to/x86root
 ./gradlew assembleDebug          # ~33 min for a cold first build on a Pi 5

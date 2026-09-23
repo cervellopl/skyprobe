@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Themed-icon layer (Android 13+): the same shapes, flat, for the system to tint. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <group android:pivotX="54" android:pivotY="54" android:rotation="-25">
+        <path android:pathData="M23,54 A31,12.5 0 1,1 85,54 A31,12.5 0 1,1 23,54 Z"
+            android:strokeWidth="5" android:strokeColor="#FFFFFFFF" android:fillColor="#00000000" />
+    </group>
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M54,33 Q56.55,50.85 71,54 Q56.55,57.15 54,75 Q51.45,57.15 37,54 Q51.45,50.85 54,33 Z" />
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M36,65.5 Q36.75,71.03 41,72 Q36.75,72.97 36,78.5 Q35.25,72.97 31,72 Q35.25,71.03 36,65.5 Z" />
+</vector>
