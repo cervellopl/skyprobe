@@ -264,6 +264,32 @@ def cone(ra: float, dec: float, radius_arcmin: float = 5.0, limit: int = 200) ->
     return out[:limit]
 
 
+def images_near(ra: float, dec: float, radius_arcmin: float, limit: int = 25,
+                exclude: str | None = None) -> list[dict]:
+    """Finished, solved images whose field could overlap a position - "other exposures of this
+    field", for blinking, comparing or stacking. `radius_arcmin` is the search radius around
+    (ra, dec), not either image's field size; the caller intersects on field-of-view itself."""
+    conn = connect()
+    r_deg = radius_arcmin / 60.0
+    dra = r_deg / max(math.cos(math.radians(dec)), 0.01)
+    rows = conn.execute(
+        "SELECT job_id, filename, created, jd_mid, utc_mid, ra, dec, pixel_scale, fov_w_deg, fov_h_deg"
+        " FROM images WHERE ra IS NOT NULL AND dec BETWEEN ? AND ? AND ra BETWEEN ? AND ?",
+        (dec - r_deg, dec + r_deg, ra - dra, ra + dra)).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        if exclude and d["job_id"] == exclude:
+            continue
+        sep = math.degrees(math.acos(min(1.0, math.sin(math.radians(dec)) * math.sin(math.radians(d["dec"]))
+                                         + math.cos(math.radians(dec)) * math.cos(math.radians(d["dec"]))
+                                         * math.cos(math.radians(ra - d["ra"])))))
+        d["separation_arcmin"] = sep * 60
+        out.append(d)
+    out.sort(key=lambda d: d["separation_arcmin"])
+    return out[:limit]
+
+
 def images(limit: int = 50, offset: int = 0) -> list[dict]:
     conn = connect()
     rows = conn.execute("SELECT * FROM images ORDER BY COALESCE(jd_mid, created) DESC LIMIT ? OFFSET ?",

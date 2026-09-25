@@ -11,13 +11,14 @@ from pathlib import Path
 
 import numpy as np
 from astropy.coordinates import SkyCoord
+from astropy.stats import sigma_clip
 from astropy.time import Time, TimeDelta
 from astropy.utils import iers
 from PIL import Image, ImageDraw, ImageFont
 
-from . import astrometry, catalogs, photometry, transients
+from . import align, astrometry, catalogs, photometry, transients
 from .detect import detect_sources
-from .imageio import DEVICE_PRESETS, load_image
+from .imageio import DEVICE_PRESETS, ObsImage, auto_stretch, downscale_preview, load_image
 
 iers.conf.auto_download = False  # never block on IERS downloads; precision is not needed here
 iers.conf.auto_max_age = None
@@ -203,6 +204,13 @@ def run(job, opts: dict, workdir: Path, log):
         f"FOV {summary['fov_w_deg']:.2f}x{summary['fov_h_deg']:.2f} deg")
     job.save()
 
+    _finish(job, opts, workdir, log, res, img, det, wcs, summary, w, h, fwhm, tobs, t_start)
+
+
+def _finish(job, opts: dict, workdir: Path, log, res: dict, img, det: dict, wcs, summary: dict,
+           w: int, h: int, fwhm: float, tobs, t_start: float):
+    """Catalogues onward: shared by a normal single-image run and `run_stack` (which arrives
+    here with a pre-solved WCS instead of running the "loading"/"plate solving" stages)."""
     want_phot = str(opts.get("photometry", "true")).lower() != "false"
     want_trans = str(opts.get("transients", "true")).lower() != "false"
     if not (want_phot or want_trans):
@@ -321,6 +329,89 @@ def run(job, opts: dict, workdir: Path, log):
     job.set_stage("rendering", 95)
     _annotate(workdir, img, res)
     res["processing_seconds"] = round(time.time() - t_start, 1)
+
+
+def run_stack(job, opts: dict, workdir: Path, log, sources: list[dict]):
+    """Aligns and co-adds several already-solved frames of the same field, then runs the
+    normal catalogue/photometry/transient stages on the deeper combined image.
+
+    `sources` (2+, any order): `{"job_id", "data" (float array from load_image), "wcs"
+    (that job's solved astropy WCS), "band", "saturation", "linear", "jd_mid"}`. The
+    "loading" and "plate solving" stages are skipped entirely - every input frame was already
+    independently solved - so this starts by reprojecting every non-reference frame onto the
+    reference frame's pixel grid (the same WCS-to-WCS resampling used for blinking, `align.py`)
+    and combining them with a sigma-clipped mean. Frames are combined as-is, without a
+    per-frame flux-normalisation step, so the stack's own photometry is approximate; a frame
+    with a very different zero point or a cloud passing through will show in the result.
+    """
+    t_start = time.time()
+    res = job.result
+    if len(sources) < 2:
+        raise RuntimeError("stacking needs at least two analysed images of the same field")
+
+    job.set_stage("loading", 5)
+    ref_id = opts.get("stack_reference")
+    ref_idx = next((i for i, s in enumerate(sources) if s["job_id"] == ref_id), 0)
+    ref = sources[ref_idx]
+    wcs = ref["wcs"]
+    h, w = ref["data"].shape
+
+    planes = [ref["data"].astype(np.float32)]
+    for i, s in enumerate(sources):
+        if i == ref_idx:
+            continue
+        planes.append(align.resample_full(wcs, w, h, s["wcs"], s["data"].astype(np.float32)))
+    stacked = np.stack(planes)
+    clipped = sigma_clip(stacked, sigma=3.0, axis=0, masked=True)
+    combined = np.ma.filled(clipped.mean(axis=0), np.nan)
+    fallback = float(np.nanmedian(planes[0]))
+    combined = np.nan_to_num(combined, nan=fallback)
+
+    band = (opts.get("band") or sources[0].get("band") or "TG").upper()
+    linear = all(bool(s.get("linear")) for s in sources)
+    saturation = min((s.get("saturation") or 1e9) for s in sources)
+    img = ObsImage(data=combined, preview=downscale_preview(auto_stretch(combined)), fmt="stack",
+                   linear=linear, saturation=saturation, band=band, meta={}, header_wcs=None, warnings=[])
+    res["file"] = {"name": job.filename, "format": "stack", "width": w, "height": h,
+                   "linear": linear, "band": band}
+    # _clean() (below) is written for scalar EXIF fields, so the frame-id list stays out of "meta"
+    res["meta"] = _clean(img.meta)
+    res["stack"] = {"of": [s["job_id"] for s in sources], "n": len(sources), "reference": ref["job_id"]}
+    res["warnings"] = ["Stacked frames are mean-combined without per-frame flux normalisation; "
+                       "treat the stack's own photometry as approximate."]
+    Image.fromarray(img.preview).convert("RGB").save(workdir / "preview.jpg", quality=88)
+    pv = Image.open(workdir / "preview.jpg")
+    res["preview"] = {"width": pv.width, "height": pv.height, "scale": pv.width / w}
+    log(f"stacked {len(sources)} frames onto {ref['job_id']}'s grid, {w}x{h}")
+
+    jds = [s["jd_mid"] for s in sources if s.get("jd_mid")]
+    if jds:
+        tobs = Time(sum(jds) / len(jds), format="jd", scale="utc")
+        res["time"] = {"utc_mid": tobs.isot, "jd_mid": float(tobs.jd), "source": "stack-mean"}
+    else:
+        tobs = None
+        res["warnings"].append("No observation time on the stacked frames: minor-body identification disabled.")
+
+    job.set_stage("detecting stars", 15)
+    det = detect_sources(combined, saturation, thresh=float(opts.get("detect_sigma") or 5.0))
+    if det["n"] < 8:
+        raise RuntimeError(f"Only {det['n']} stars detected in the stack - check the frames overlap")
+    fwhm = det["fwhm"]
+    res["detections"] = {"count": det["n"], "fwhm_px": fwhm, "background_rms": det["bkg_rms"],
+                         "threshold_sigma": det["thresh"], "sky_fraction": det.get("sky_fraction", 1.0),
+                         "count_on_sky": det.get("n_on_sky", det["n"])}
+    log(f"{det['n']} sources in the stack, median FWHM {fwhm:.2f}px")
+
+    job.set_stage("plate solving", 25)   # nothing to solve - every input frame already was
+    summary = astrometry.wcs_summary(wcs, w, h)
+    summary.update({"solver": f"stack of {len(sources)} pre-solved frames", "solve_seconds": 0.0})
+    res["solution"] = summary
+    res["detections"]["fwhm_arcsec"] = fwhm * summary["pixel_scale"]
+    (workdir / "solution.wcs").write_text(wcs.to_header(relax=True).tostring(sep="\n"))
+    wcs.to_fits(relax=True).writeto(workdir / "wcs.fits", overwrite=True)
+    job.save()
+
+    _finish(job, opts, workdir, log, res, img, det, wcs, summary, w, h, fwhm, tobs, t_start)
 
 
 def _central(o, w, h, frac):

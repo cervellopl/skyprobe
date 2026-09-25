@@ -27,13 +27,14 @@
     <p class="muted">Phone or Seestar frames — JPEG, HEIC, camera RAW (DNG, CR2, NEF, ARW…) or FITS. The image is plate-solved with astrometry.net, searched for novae/comets and every catalogued variable star in the field is measured.</p>
     <form id="form">
       <label id="drop" class="drop" tabindex="0">
-        <input type="file" id="file" name="file" hidden>
+        <input type="file" id="file" name="file" multiple hidden>
         <div class="dropInner">
           <svg width="36" height="36" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 3l4 4h-3v6h-2V7H8l4-4zm-7 14h14v2H5v-2z"/></svg>
-          <div><strong>Drop an image here</strong> or click to choose</div>
+          <div><strong>Drop one or more images here</strong> or click to choose</div>
           <div id="fileName" class="muted small"></div>
         </div>
       </label>
+      <div id="queueList" class="hidden"></div>
 
       <div class="row">
         <label>Device
@@ -137,6 +138,20 @@
     <div class="card">
       <div class="tableHead"><h2>Known asteroids &amp; comets in field</h2></div>
       <div id="minor"></div>
+    </div>
+
+    <div class="card hidden" id="compareCard">
+      <div class="tableHead"><h2>Compare with other exposures of this field</h2></div>
+      <p class="muted small">Other analysed images whose field overlaps this one. Blink two of your own
+        exposures against each other from a close-up above, find candidate movers between the ones you
+        pick here, or stack them for a deeper look.</p>
+      <div id="compareList"></div>
+      <div class="actions" style="justify-content:flex-start;gap:8px;margin-top:10px">
+        <button type="button" class="ghost small" id="btnFindMovers">Find movers</button>
+        <button type="button" class="ghost small" id="btnStack">Stack selected</button>
+        <span class="muted small" id="compareInfo"></span>
+      </div>
+      <div id="compareResults"></div>
     </div>
 
     <div class="card">

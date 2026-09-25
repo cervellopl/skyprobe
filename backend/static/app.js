@@ -10,6 +10,8 @@ const COLORS = { unidentified: "#ff5a5f", known: "#ffd23f", variable: "#5cd0ff",
 let job = null, health = {}, pollTimer = null, view = { z: 1, x: 0, y: 0 }, selected = null;
 let display = { brightness: Number(store.get("sp_bright")) || 1, contrast: Number(store.get("sp_contrast")) || 1 };
 let cutoutSource = store.get("sp_cutsrc") || "preview";
+let queue = [];           // files picked for upload: [{file, id, status, error, pct}]
+let nearbyJobs = [];      // other analysed jobs whose field overlaps the one on screen
 
 // ---------------------------------------------------------------- server status
 fetch("/api/health").then((r) => r.json()).then((h) => {
@@ -26,17 +28,24 @@ for (const id of ["apikey", "obscode", "observer", "site", "instrument"]) { cons
 for (const k of ["lat", "lon"]) { const v = store.get("sp_" + k); if (v) $(`[name=${k}]`).value = v; }
 
 const drop = $("#drop"), fileInput = $("#file");
-function setFile(f) {
-  if (!f) return;
-  const dt = new DataTransfer(); dt.items.add(f); fileInput.files = dt.files;
-  $("#fileName").textContent = `${f.name} · ${(f.size / 1048576).toFixed(1)} MB`;
+function setFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  const dt = new DataTransfer();
+  files.forEach((f) => dt.items.add(f));
+  fileInput.files = dt.files;
+  queue = files.map((f) => ({ file: f, id: null, status: "queued", error: null, pct: 0 }));
+  $("#fileName").textContent = files.length === 1
+    ? `${files[0].name} · ${(files[0].size / 1048576).toFixed(1)} MB`
+    : `${files.length} files selected`;
+  $("#queueList").classList.add("hidden");
   $("#btnSubmit").disabled = false;
 }
-fileInput.addEventListener("change", () => setFile(fileInput.files[0]));
+fileInput.addEventListener("change", () => setFiles(fileInput.files));
 drop.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); } });
 ["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); }));
 ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
-drop.addEventListener("drop", (e) => setFile(e.dataTransfer.files[0]));
+drop.addEventListener("drop", (e) => setFiles(e.dataTransfer.files));
 
 $("#btnGeo").addEventListener("click", () => {
   navigator.geolocation?.getCurrentPosition((p) => {
@@ -47,11 +56,14 @@ $("#btnGeo").addEventListener("click", () => {
 
 $("#form").addEventListener("submit", (e) => {
   e.preventDefault();
+  if (!queue.length) return;
   const fd = new FormData($("#form"));
   for (const k of ["photometry", "transients"]) fd.set(k, $(`[name=${k}]`).checked ? "true" : "false");
   const t = fd.get("obs_time"); if (t) fd.set("obs_time", t.length === 16 ? t + ":00" : t);
   for (const [k, v] of [...fd.entries()]) if (v === "" && k !== "file") fd.delete(k);
   for (const id of ["apikey", "obscode", "observer", "site", "instrument"]) store.set("sp_" + id, $("#" + id).value);
+  if (queue.length > 1) { uploadQueue(fd); return; }
+  fd.set("file", queue[0].file);
   upload(fd);
 });
 
@@ -77,6 +89,54 @@ function upload(fd) {
   };
   xhr.onerror = () => showProgress("Upload failed", 0, "network error", true);
   xhr.send(fd);
+}
+
+/** Several images picked at once: uploaded one at a time (the server itself works one job at a
+ * time by default), each tracked in a small queue list instead of the single-job progress bar. */
+async function uploadQueue(baseFd) {
+  $("#queueList").classList.remove("hidden");
+  drawQueue();
+  for (const item of queue) {
+    item.status = "uploading";
+    drawQueue();
+    const fd = new FormData();
+    for (const [k, v] of baseFd.entries()) if (k !== "file") fd.append(k, v);
+    fd.append("file", item.file);
+    let r, body;
+    try {
+      r = await fetch("/api/jobs", { method: "POST", body: fd });
+      body = await r.json();
+    } catch (e) {
+      item.status = "failed"; item.error = "network error"; drawQueue(); continue;
+    }
+    if (r.status >= 300) { item.status = "failed"; item.error = body.detail || r.statusText; drawQueue(); continue; }
+    item.id = body.id;
+    item.status = "running";
+    drawQueue();
+    await new Promise((resolve) => {
+      const tick = async () => {
+        let jr; try { jr = await (await fetch(`/api/jobs/${item.id}`)).json(); } catch { setTimeout(tick, 2000); return; }
+        if (jr.status === "failed") { item.status = "failed"; item.error = jr.error || "failed"; drawQueue(); resolve(); return; }
+        if (jr.status !== "done") { item.pct = jr.progress || 0; drawQueue(); setTimeout(tick, 1500); return; }
+        item.status = "done"; drawQueue(); resolve();
+      };
+      tick();
+    });
+  }
+  const last = [...queue].reverse().find((q) => q.status === "done");
+  if (last) { location.hash = "job=" + last.id; poll(last.id); }
+}
+
+function drawQueue() {
+  const el = $("#queueList");
+  const label = (q) => q.status === "done" ? "done" : q.status === "failed" ? (q.error || "failed")
+    : q.status === "running" ? `${q.pct || 0}%` : q.status === "uploading" ? "uploading…" : "waiting…";
+  el.innerHTML = queue.map((q, i) => `<div class="qrow${q.status === "done" ? " open" : ""}" data-i="${i}">
+    <span class="wrap">${esc(q.file.name)}</span>
+    <span class="muted small${q.status === "failed" ? " error" : ""}">${esc(label(q))}</span></div>`).join("");
+  el.querySelectorAll(".qrow.open").forEach((row) => row.onclick = () => {
+    const q = queue[+row.dataset.i]; location.hash = "job=" + q.id; poll(q.id);
+  });
 }
 
 function showProgress(stage, pct, log, err, retryId) {
@@ -122,12 +182,14 @@ const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
 // ---------------------------------------------------------------- results
 function render(r) {
-  job = r; selected = null;
+  job = r; selected = null; nearbyJobs = [];
+  $("#compareCard").classList.add("hidden");
   $("#results").classList.remove("hidden");
   const w = r.warnings || [];
   $("#warnings").classList.toggle("hidden", !w.length);
   $("#warnings").innerHTML = w.map((x) => `<div>⚠ ${esc(x)}</div>`).join("");
   renderSolution(r); renderCalib(r); renderCandidates(r); renderVariables(r); renderMinor(r);
+  if (r.solution) fetchNearby(r.id);
   $("#fullLog").textContent = (r.log || []).join("\n") + "\n\nmeta: " + JSON.stringify(r.meta, null, 1);
   const base = `/api/jobs/${r.id}/`;
   $("#dlCand").href = base + "candidates.csv"; $("#dlPhot").href = base + "photometry.csv"; $("#dlAavso").href = base + "aavso.txt";
@@ -351,13 +413,19 @@ $("#bright")?.addEventListener("input", (e) => { display.brightness = +e.target.
 $("#contrast")?.addEventListener("input", (e) => { display.contrast = +e.target.value; applyDisplay(); });
 $("#bcReset")?.addEventListener("click", () => { display = { brightness: 1, contrast: 1 }; applyDisplay(); });
 
-// blink comparison: our close-up against the same patch of sky from a survey
-let compare = { survey: store.get("sp_survey") || "dss2", mode: "image", timer: null };
+// blink comparison: our close-up against the same patch of sky from a survey, or from another
+// of the user's own analysed images of the same field
+let compare = { survey: store.get("sp_survey") || "dss2", mode: "image", second: "survey", other: null, timer: null };
 function stopBlink() { clearInterval(compare.timer); compare.timer = null; }
 
 function surveyOptions() {
   const list = (health.surveys || [{ id: "dss2", label: "DSS2 colour" }]);
   return list.map((s) => `<option value="${esc(s.id)}"${s.id === compare.survey ? " selected" : ""}>${esc(s.label)}</option>`).join("");
+}
+
+function otherOptions() {
+  return nearbyJobs.map((j) => `<option value="${esc(j.job_id)}"${j.job_id === compare.other ? " selected" : ""}>` +
+    `${esc(j.filename || j.job_id.slice(0, 8))}${j.jd_mid ? " · " + esc(jdToDate(j.jd_mid)) : ""}</option>`).join("");
 }
 
 // close-up of whatever is selected, cut from the preview on the server
@@ -369,6 +437,10 @@ function showSelected(key) {
   const url = `/api/jobs/${job.id}/cutout.jpg?${geom}` +
     `&source=${cutoutSource}&brightness=${display.brightness}&contrast=${display.contrast}`;
   const dssUrl = `/api/jobs/${job.id}/dss.jpg?${geom}&survey=${encodeURIComponent(compare.survey)}`;
+  if (nearbyJobs.length && !compare.other) compare.other = nearbyJobs[0].job_id;
+  const otherUrl = nearbyJobs.length
+    ? `/api/jobs/${job.id}/align.jpg?${geom}&with=${encodeURIComponent(compare.other)}&source=${cutoutSource}`
+    : null;
   const title = key[0] === "v" ? o.name : key[0] === "m" ? o.name : o.label;
   const m = job.meta || {};
   const shot = [m.exptime != null ? `${fmt(m.exptime, m.exptime < 10 ? 2 : 1)} s` : null,
@@ -394,8 +466,11 @@ function showSelected(key) {
       ${cutoutSource === "original" ? "checked" : ""}> full resolution
       <span class="muted">(first one decodes the original)</span></label>
     ${job.solution ? `<div class="compare">
-      <div class="seg"><button data-mode="image">Image</button><button data-mode="survey">Survey</button><button data-mode="blink">Blink</button></div>
+      <div class="seg"><button data-mode="image">Image</button><button data-mode="survey">Survey</button>
+        ${otherUrl ? `<button data-mode="mine">My images</button>` : ""}
+        <button data-mode="blink">Blink</button></div>
       <select id="selSurvey">${surveyOptions()}</select>
+      ${otherUrl ? `<select id="selOther">${otherOptions()}</select>` : ""}
       <span class="muted small" id="selShowing"></span>
     </div>` : ""}
     <div class="links"><a class="btn small" target="_blank" rel="noopener" href="${aladin(o.ra, o.dec)}">Aladin</a>
@@ -410,19 +485,22 @@ function showSelected(key) {
   const img = card.querySelector("img"), label = $("#selShowing");
   if (!job.solution) return;
   new Image().src = dssUrl;      // warm the server-side cache while the user reads the facts
+  if (otherUrl) new Image().src = otherUrl;
+  const urls = { image: url, survey: dssUrl, mine: otherUrl };
   const show = (which) => {
-    img.src = which === "survey" ? dssUrl : url;
-    if (label) label.textContent = which === "survey"
-      ? $("#selSurvey").selectedOptions[0].textContent : "your image";
+    img.src = urls[which] || url;
+    if (label) label.textContent = which === "survey" ? $("#selSurvey").selectedOptions[0].textContent
+      : which === "mine" ? ($("#selOther")?.selectedOptions[0]?.textContent || "your other image") : "your image";
   };
   const setMode = (mode) => {
     stopBlink();
     compare.mode = mode;
+    if (mode === "survey" || mode === "mine") compare.second = mode;
     card.querySelectorAll(".seg button").forEach((b) => b.classList.toggle("on", b.dataset.mode === mode));
     if (mode === "blink") {
       let on = false;
       show("image");
-      compare.timer = setInterval(() => { on = !on; show(on ? "survey" : "image"); }, 900);
+      compare.timer = setInterval(() => { on = !on; show(on ? compare.second : "image"); }, 900);
     } else {
       show(mode);
     }
@@ -433,7 +511,8 @@ function showSelected(key) {
     store.set("sp_survey", compare.survey);
     showSelected(key);
   };
-  setMode(compare.mode);
+  $("#selOther")?.addEventListener("change", (e) => { compare.other = e.target.value; showSelected(key); });
+  setMode(compare.mode === "mine" && !otherUrl ? "image" : compare.mode);
 }
 
 function select(key) {
@@ -448,6 +527,101 @@ function focusOn(o) {
   view.x = viewer.clientWidth / 2 - o.x * s * view.z; view.y = viewer.clientHeight / 2 - o.y * s * view.z;
   selected = key; apply(); select(key);
   viewer.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+// ---------------------------------------------------------------- compare / movers / stack
+async function fetchNearby(id) {
+  try { nearbyJobs = await (await fetch(`/api/jobs/${id}/nearby`)).json(); } catch { nearbyJobs = []; }
+  if (!Array.isArray(nearbyJobs)) nearbyJobs = [];
+  renderCompareCard();
+  if (selected) showSelected(selected);      // now that nearbyJobs is known, offer "My images" too
+}
+
+function renderCompareCard() {
+  const card = $("#compareCard");
+  if (!nearbyJobs.length) { card.classList.add("hidden"); return; }
+  card.classList.remove("hidden");
+  $("#compareList").innerHTML = `<div class="tbl"><table><thead><tr><th></th><th>File</th><th>Date (UT)</th><th>Separation</th></tr></thead>
+    <tbody><tr><td><input type="checkbox" checked disabled></td>
+      <td>${esc(job.filename)} <span class="muted small">(this one)</span></td>
+      <td>${job.time ? esc(job.time.utc_mid.replace("T", " ").slice(0, 16)) : "–"}</td><td>–</td></tr>
+    ${nearbyJobs.map((j) => `<tr><td><input type="checkbox" class="cmpSel" data-id="${esc(j.job_id)}" checked></td>
+      <td>${esc(j.filename || j.job_id)}</td><td>${j.jd_mid ? jdToDate(j.jd_mid) : "–"}</td>
+      <td>${fmt(j.separation_arcmin, 1)}′</td></tr>`).join("")}
+    </tbody></table></div>`;
+  $("#compareResults").innerHTML = "";
+  $("#compareInfo").textContent = "";
+}
+
+function selectedCompareIds() {
+  return [job.id, ...[...document.querySelectorAll(".cmpSel:checked")].map((c) => c.dataset.id)];
+}
+
+$("#btnFindMovers")?.addEventListener("click", async () => {
+  const ids = selectedCompareIds();
+  if (ids.length < 2) { $("#compareInfo").textContent = "pick at least one other exposure above"; return; }
+  $("#compareInfo").textContent = "comparing…";
+  $("#compareResults").innerHTML = "";
+  const r = await fetch(`/api/compare?jobs=${ids.map(encodeURIComponent).join(",")}`);
+  const v = await r.json();
+  if (!r.ok) { $("#compareInfo").textContent = v.detail || "comparison failed"; return; }
+  $("#compareInfo").textContent = `${v.movers.length} candidate mover(s) · ${v.stationary_unidentified.length} unmoved unidentified source(s)`;
+  renderCompareResults(v);
+});
+
+$("#btnStack")?.addEventListener("click", async () => {
+  const ids = selectedCompareIds();
+  if (ids.length < 2) { $("#compareInfo").textContent = "pick at least one other exposure above"; return; }
+  if (!confirm(`Stack ${ids.length} frames into a new, deeper analysis?`)) return;
+  $("#compareInfo").textContent = "starting the stack…";
+  const r = await fetch("/api/stack", { method: "POST", body: new URLSearchParams({ job_ids: ids.join(",") }) });
+  const v = await r.json();
+  if (!r.ok) { $("#compareInfo").textContent = v.detail || "could not start the stack"; return; }
+  location.hash = "job=" + v.id;
+  poll(v.id);
+});
+
+function renderCompareResults(v) {
+  const el = $("#compareResults");
+  const moverRows = (v.movers || []).map((m, i) => ({ ...m, _key: "mv" + i }));
+  const moverTbl = moverRows.length ? `<div class="tbl"><table><thead>
+      <tr><th>Frames</th><th>Rate (″/h)</th><th>Direction</th><th>Confidence</th><th>RA Dec (first)</th></tr></thead>
+      <tbody>${moverRows.map((m) => `<tr data-k="${m._key}"><td>${m.frames.length}</td><td>${fmt(m.rate_arcsec_h, 1)}</td>
+        <td>${fmt(m.direction_deg, 0)}°</td><td>${esc(m.confidence)}</td><td>${sky(m.frames[0])}</td></tr>`).join("")}
+      </tbody></table></div>` : `<p class="empty">None found.</p>`;
+  const stationary = v.stationary_unidentified || [];
+  el.innerHTML = `<h3 class="small muted" style="margin:14px 0 4px">Candidate movers</h3>${moverTbl}` +
+    (stationary.length ? `<h3 class="small muted" style="margin:14px 0 4px">Unmoved, still unidentified</h3>
+      <div class="tbl"><table><thead><tr><th>RA Dec</th><th>Seen in</th></tr></thead><tbody>
+      ${stationary.map((s) => `<tr><td>${sky(s)}</td><td>${s.seen_in.length} frame(s)</td></tr>`).join("")}
+      </tbody></table></div>` : "");
+  el.querySelectorAll("tr[data-k]").forEach((tr) => tr.onclick = () => blinkMover(moverRows.find((m) => m._key === tr.dataset.k)));
+}
+
+/** Cycles through a candidate mover's own close-up in each frame it was seen in: a real mover
+ * jumps from frame to frame while the surrounding star field does not. */
+function blinkMover(mover) {
+  stopBlink();
+  selected = null;
+  const card = $("#selectedCard");
+  card.classList.remove("hidden");
+  const urls = mover.frames.map((f) => `/api/jobs/${f.job_id}/cutout.jpg?x=${f.x.toFixed(1)}&y=${f.y.toFixed(1)}&size=90&zoom=4`);
+  urls.forEach((u) => new Image().src = u);
+  card.innerHTML = `<div class="tableHead"><h2>Mover blink</h2><span class="grow"></span><button class="ghost small" id="selClose">×</button></div>
+    <img id="moverImg" src="${urls[0]}" alt="candidate mover">
+    <div class="facts">
+      <div><span>Rate</span><span>${fmt(mover.rate_arcsec_h, 1)} ″/h</span></div>
+      <div><span>Direction</span><span>${fmt(mover.direction_deg, 0)}°</span></div>
+      <div><span>Confidence</span><span>${esc(mover.confidence)}</span></div>
+      <div><span>Frames</span><span>${mover.frames.length}</span></div>
+    </div>
+    <p class="muted small" style="margin-top:8px">Cycling through this candidate's position in each frame.
+      A real moving object jumps from frame to frame while the background stars stay put.</p>`;
+  $("#selClose").onclick = () => { stopBlink(); card.classList.add("hidden"); };
+  const img = $("#moverImg");
+  let i = 0;
+  compare.timer = setInterval(() => { i = (i + 1) % urls.length; img.src = urls[i]; }, 900);
+  card.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 // ---------------------------------------------------------------- history

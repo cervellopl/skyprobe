@@ -18,6 +18,8 @@ import numpy as np
 from astropy.io import fits
 from astropy.wcs import WCS
 
+from . import align
+
 SERVICE = "https://alasky.cds.unistra.fr/hips-image-services/hips2fits"
 
 SURVEYS = {
@@ -62,9 +64,10 @@ def aligned_cutout(job_wcs: WCS, x: float, y: float, size: float, out_px: int,
     `size` is the width of the close-up in original image pixels and `out_px` the rendered
     size, exactly as for /cutout.jpg, so the two images can be blinked without shifting.
     """
-    from scipy.ndimage import map_coordinates
-
     hips = SURVEYS.get(survey, SURVEYS[DEFAULT_SURVEY])[0]
+
+    # a frame a little wider than the close-up, so rotation cannot cut the corners off
+    from astropy.coordinates import SkyCoord
     step = size / out_px
     grid = x - size / 2 + (np.arange(out_px) + 0.5) * step
     gy = y - size / 2 + (np.arange(out_px) + 0.5) * step
@@ -72,9 +75,6 @@ def aligned_cutout(job_wcs: WCS, x: float, y: float, size: float, out_px: int,
     ra, dec = job_wcs.all_pix2world(ux.ravel(), uy.ravel(), 0)
     if not np.isfinite(ra).any():
         raise ValueError("this part of the image has no valid sky coordinates")
-
-    # a frame a little wider than the close-up, so rotation cannot cut the corners off
-    from astropy.coordinates import SkyCoord
     ra0, dec0 = job_wcs.all_pix2world([x], [y], 0)
     centre = SkyCoord(ra0[0], dec0[0], unit="deg")
     sep = centre.separation(SkyCoord(ra, dec, unit="deg")).deg
@@ -82,13 +82,11 @@ def aligned_cutout(job_wcs: WCS, x: float, y: float, size: float, out_px: int,
     px = int(np.clip(fetch_px or out_px * 3 // 2, 128, 1000))
     data, wcs = _fetch(hips, float(ra0[0]), float(dec0[0]), fov, px, cache or Path("/tmp/skyprobe-dss"))
 
-    px_x, px_y = wcs.all_world2pix(ra, dec, 0)
-    coords = np.vstack([px_y, px_x])
     planes = data if data.ndim == 3 else data[None]
     out = []
     for plane in planes[:3]:
-        v = map_coordinates(np.nan_to_num(plane.astype(np.float32)), coords, order=1, mode="constant", cval=0.0)
-        out.append(v.reshape(out_px, out_px))
+        v = align.resample(job_wcs, x, y, size, out_px, wcs, plane)
+        out.append(np.nan_to_num(v, nan=0.0))
     arr = np.dstack(out) if len(out) == 3 else np.dstack(out * 3)
     return _to_8bit(arr)
 

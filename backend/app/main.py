@@ -6,6 +6,10 @@ GET  /api/jobs/{id}       status + full results (poll until status is done/faile
 GET  /api/jobs/{id}/preview.jpg | annotated.jpg | wcs.fits | solution.wcs | aavso.txt | photometry.csv | candidates.csv
 GET  /api/jobs/{id}/cutout.jpg?x=&y=[&source=original]  close-up of one object
 GET  /api/jobs/{id}/dss.jpg?x=&y=[&survey=]   the same patch of sky from a survey (blink comparison)
+GET  /api/jobs/{id}/align.jpg?x=&y=&with=   the same patch from another of your own analysed jobs
+GET  /api/jobs/{id}/nearby    other finished jobs whose field overlaps this one
+GET  /api/compare?jobs=id1,id2[,...]   moving/stationary "unidentified" candidates across jobs
+POST /api/stack               align and co-add several analysed jobs, then re-run the pipeline
 GET  /api/jobs/{id}/report.pdf    printable PDF report
 GET  /api/jobs/{id}/vsnet         composed vsnet-obs posting (JSON, or text with ?plain=true)
 POST /api/jobs/{id}/rerun     analyse the same file again (same job id)
@@ -32,7 +36,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -41,8 +45,8 @@ import urllib.error
 
 import numpy as np
 
-from . import astrometry, db, dss, pipeline, report as report_mod, vsnet
-from .imageio import DEVICE_PRESETS, FITS_EXT, JPEG_EXT, RAW_EXT
+from . import align, astrometry, db, dss, multiframe, pipeline, report as report_mod, vsnet
+from .imageio import DEVICE_PRESETS, FITS_EXT, JPEG_EXT, RAW_EXT, load_image
 
 VERSION = "1.0.0"
 ROOT = Path(__file__).resolve().parent.parent
@@ -125,11 +129,15 @@ def _json_default(o):
     return str(o)
 
 
-def _run_job(job: Job, opts: dict):
+def _run_job(job: Job, opts: dict, runner=None):
+    """`runner` defaults to the normal single-image pipeline; /api/stack passes one that calls
+    `pipeline.run_stack` instead, so the rest of this - status handling, DB ingest, pruning,
+    stall/interruption bookkeeping - is shared instead of duplicated."""
+    runner = runner or (lambda: pipeline.run(job, opts, job.dir, job.log))
     with RUNNING_LOCK:
         RUNNING.add(job.id)
     try:
-        pipeline.run(job, opts, job.dir, job.log)
+        runner()
         job.result.update({"status": "done", "stage": "done", "progress": 100})
         try:
             stored = db.ingest(job.result, job.input_path)
@@ -389,6 +397,26 @@ def get_job(job_id: str):
     return JSONResponse(_load(job_id))
 
 
+@app.get("/api/jobs/{job_id}/nearby", dependencies=[Depends(auth)])
+def job_nearby(job_id: str, limit: int = 25):
+    """Other finished, solved jobs whose field overlaps this one's - to blink, compare or
+    stack against. Only jobs already folded into the measurement database are found (that
+    happens right after a job finishes), so a job still running will not see itself listed."""
+    r = _load(job_id)
+    sol = r.get("solution")
+    if not sol or sol.get("ra") is None:
+        raise HTTPException(409, "this image has no astrometric solution")
+    own_radius = max(sol.get("fov_w_deg") or 0, sol.get("fov_h_deg") or 0) / 2 or 0.05
+    rows = db.images_near(sol["ra"], sol["dec"], max(own_radius * 2, 5.0) * 60,
+                          limit=limit * 3, exclude=job_id)
+    out = []
+    for row in rows:
+        other_radius = max(row.get("fov_w_deg") or 0, row.get("fov_h_deg") or 0) / 2 or 0.05
+        if row["separation_arcmin"] / 60.0 <= (own_radius + other_radius) * 1.05:
+            out.append(row)
+    return out[:limit]
+
+
 @app.post("/api/jobs/{job_id}/rerun", status_code=202, dependencies=[Depends(auth)])
 def rerun_job(job_id: str):
     """Analyses the stored file again under the same id, with the options it was sent with."""
@@ -406,6 +434,71 @@ def rerun_job(job_id: str):
         (JOBS_DIR / job_id / name).unlink(missing_ok=True)
     executor.submit(_run_job, job, opts)
     return {"id": job_id, "status": "queued", "url": f"/api/jobs/{job_id}"}
+
+
+@app.post("/api/stack", status_code=202, dependencies=[Depends(auth)])
+def stack_jobs(
+    job_ids: str = Form(...), reference: str = Form(""),
+    photometry: str = Form("true"), transients: str = Form("true"),
+    band: str = Form(""), mag_limit: str = Form(""), obscode: str = Form(""),
+    detect_sigma: str = Form(""), aperture: str = Form(""),
+    annulus_in: str = Form(""), annulus_out: str = Form(""), snr_min: str = Form(""),
+):
+    """Aligns and co-adds several already-analysed images of the same field, then runs the
+    normal pipeline on the deeper combined image - a new job, just like a fresh upload."""
+    ids = [j.strip() for j in job_ids.split(",") if j.strip()]
+    if len(ids) < 2:
+        raise HTTPException(400, "stacking needs at least two job ids")
+    if reference and reference not in ids:
+        raise HTTPException(400, "reference must be one of job_ids")
+    sources = []
+    for jid in ids:
+        r = _load(jid)
+        if r.get("status") != "done" or not (r.get("solution") or {}).get("ra"):
+            raise HTTPException(409, f"job {jid} is not a finished, solved analysis")
+        wcs_path = JOBS_DIR / jid / "wcs.fits"
+        if not wcs_path.exists():
+            raise HTTPException(409, f"job {jid} has no astrometric solution on disk")
+        from astropy.io import fits as _fits
+        from astropy.wcs import WCS
+
+        img_obj = load_image(_input_file(jid))
+        sources.append({"job_id": jid, "data": img_obj.data, "wcs": WCS(_fits.getheader(wcs_path)).celestial,
+                        "band": img_obj.band, "saturation": img_obj.saturation, "linear": img_obj.linear,
+                        "jd_mid": (r.get("time") or {}).get("jd_mid")})
+
+    opts = {k: v for k, v in dict(photometry=photometry, transients=transients, band=band, mag_limit=mag_limit,
+                                  obscode=obscode, detect_sigma=detect_sigma, aperture=aperture,
+                                  annulus_in=annulus_in, annulus_out=annulus_out, snr_min=snr_min).items()
+            if v not in ("", None)}
+    opts["stack_of"] = ids
+    if reference:
+        opts["stack_reference"] = reference
+    job_id = secrets.token_hex(8)
+    (JOBS_DIR / job_id).mkdir(parents=True)
+    job = Job(job_id, f"stack of {len(ids)} frames", "", opts)
+    job.save()
+    executor.submit(_run_job, job, opts, lambda: pipeline.run_stack(job, opts, job.dir, job.log, sources))
+    return {"id": job_id, "status": "queued", "url": f"/api/jobs/{job_id}"}
+
+
+@app.get("/api/compare", dependencies=[Depends(auth)])
+def compare_jobs(jobs: str, tol_arcsec: float = 8.0, max_rate_arcsec_h: float = 1500.0):
+    """Compares the "unidentified" candidates of 2+ finished jobs of the same field: flags
+    ones that moved between frames (candidate movers - uncatalogued asteroids/comets) and
+    ones that stayed put in every frame but are still in no catalogue (candidate novae)."""
+    ids = [j.strip() for j in jobs.split(",") if j.strip()]
+    if len(ids) < 2:
+        raise HTTPException(400, "need at least two job ids")
+    frames = []
+    for jid in ids:
+        r = _load(jid)
+        if r.get("status") != "done":
+            raise HTTPException(409, f"job {jid} is not a finished analysis")
+        t = r.get("time") or {}
+        cands = [c for c in r.get("candidates", []) if c.get("status") == "unidentified"]
+        frames.append({"job_id": jid, "jd_mid": t.get("jd_mid"), "candidates": cands})
+    return multiframe.find_movers(frames, tol_arcsec=tol_arcsec, max_rate_arcsec_h=max_rate_arcsec_h)
 
 
 @app.delete("/api/jobs/{job_id}", dependencies=[Depends(auth)])
@@ -592,6 +685,60 @@ def job_dss(job_id: str, x: float, y: float, size: int = 80, zoom: int = 4, mark
     return Response(dss.jpeg(np.asarray(im)), media_type="image/jpeg",
                     headers={"Cache-Control": "public, max-age=86400",
                              "X-Survey": dss.SURVEYS[survey][1]})
+
+
+@app.get("/api/jobs/{job_id}/align.jpg", dependencies=[Depends(auth)])
+def job_align(job_id: str, x: float, y: float, other: str = Query(..., alias="with"),
+             size: int = 80, zoom: int = 4, mark: bool = True,
+             brightness: float = 1.0, contrast: float = 1.0, source: str = "preview"):
+    """The same piece of sky as /cutout.jpg, but resampled from another of the user's own
+    analysed images (`with`) instead of a sky survey - for blinking two of your own exposures
+    of the same field against each other, the same way /dss.jpg blinks against a survey.
+    """
+    from PIL import Image, ImageEnhance
+    from astropy.io import fits as _fits
+    from astropy.wcs import WCS
+
+    _load(job_id)
+    other_r = _load(other)
+    wcs_path = JOBS_DIR / job_id / "wcs.fits"
+    other_wcs_path = JOBS_DIR / other / "wcs.fits"
+    if not wcs_path.exists() or not other_wcs_path.exists():
+        raise HTTPException(409, "both images need an astrometric solution to be aligned")
+    size = max(16, min(size, 1200))
+    zoom = max(1, min(zoom, 12))
+    target = max(32, min(int(round(size * zoom)), 1600))
+
+    dst_wcs = WCS(_fits.getheader(wcs_path)).celestial
+    src_wcs = WCS(_fits.getheader(other_wcs_path)).celestial
+
+    if source == "original":
+        src_path, src_scale = _fullres(other), 1.0
+    elif source == "preview":
+        src_path = JOBS_DIR / other / "preview.jpg"
+        src_scale = float((other_r.get("preview") or {}).get("scale") or 1.0)
+    else:
+        raise HTTPException(400, "source must be 'preview' or 'original'")
+    if not src_path.exists():
+        raise HTTPException(404, "no image to align from")
+    with Image.open(src_path) as im0:
+        src_arr = np.asarray(im0.convert("RGB"), dtype=np.float32)
+
+    try:
+        planes = [align.resample(dst_wcs, x, y, float(size), target, src_wcs, src_arr[..., c], src_scale)
+                 for c in range(3)]
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    arr = np.clip(np.nan_to_num(np.dstack(planes), nan=0.0), 0, 255).astype(np.uint8)
+    im = Image.fromarray(arr)
+    if abs(brightness - 1.0) > 0.01:
+        im = ImageEnhance.Brightness(im).enhance(brightness)
+    if abs(contrast - 1.0) > 0.01:
+        im = ImageEnhance.Contrast(im).enhance(contrast)
+    if mark:
+        _crosshair(im)
+    return Response(dss.jpeg(np.asarray(im)), media_type="image/jpeg",
+                    headers={"Cache-Control": "public, max-age=3600"})
 
 
 @app.get("/api/db/stats", dependencies=[Depends(auth)])

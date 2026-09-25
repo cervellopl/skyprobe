@@ -144,6 +144,10 @@ Interactive docs (OpenAPI) at `/docs`. Set `API_TOKEN` to require `X-API-Key` on
 | `GET` | `/api/jobs/{id}/aavso.txt` | AAVSO Extended Format report |
 | `GET` | `/api/jobs/{id}/cutout.jpg?x=&y=` | close-up of one object (`&source=original` for full resolution) |
 | `GET` | `/api/jobs/{id}/dss.jpg?x=&y=[&survey=]` | the same patch of sky from a survey, on our pixel grid |
+| `GET` | `/api/jobs/{id}/align.jpg?x=&y=&with={id}` | the same patch from another of your own analysed jobs |
+| `GET` | `/api/jobs/{id}/nearby` | other finished, solved jobs whose field overlaps this one |
+| `GET` | `/api/compare?jobs={id},{id}[,…]` | candidate movers / unmoved unidentified sources across jobs |
+| `POST` | `/api/stack` | align, co-add and re-analyse several already-solved jobs as one deeper job |
 | `GET` | `/api/jobs/{id}/report.pdf` | printable PDF report (image, astrometry, calibration, tables) |
 | `GET` | `/api/jobs/{id}/vsnet` | composed vsnet-obs posting (`?plain=true` for text) |
 
@@ -168,6 +172,34 @@ hot pixel does not. Surveys: DSS2 colour/red/blue/near-IR (1990s plates), Pan-ST
 SDSS DR9 and 2MASS; `/api/health` lists them. The web page and
 the Android close-up both offer *Image / Survey / Blink*, and the renderings are cached per
 job, so a second look is instant.
+
+### Analysing several images of the same field
+
+A single frame cannot prove a moving object or a transient; the usual next step is a second
+exposure of the same field, taken later. Once two or more images have been analysed,
+`/api/jobs/{id}/nearby` finds the others whose field-of-view overlaps this one (used to
+populate every picker below), and three things become possible:
+
+* **Blink against your own image, not just a survey** - `align.jpg` is `dss.jpg`'s trick
+  (same reprojection code, `app/align.py`) run against another of *your* analysed jobs
+  instead of a HiPS survey. The web close-up's *Image / Survey / Blink* toggle grows a
+  *My other images* option whenever an overlapping job exists.
+* **Find candidate movers** - `/api/compare?jobs=…` compares the *unidentified* candidates
+  (the ones already screened out of every catalogue) across 2+ jobs and reports two things:
+  candidates that moved a plausible amount between the frames' epochs (chained across 3+
+  frames when the rate and direction stay consistent - the classic amateur asteroid/comet
+  hunt), and candidates that stayed exactly still in every frame supplied, which is
+  interesting for the opposite reason - still nothing in any catalogue, but not moving
+  either, worth a second look as a possible nova or supernova. The web page's *Compare with
+  other exposures* panel drives this and blinks each candidate mover's own close-up across
+  the frames it was seen in.
+* **Stack for depth** - `POST /api/stack` aligns several already-solved jobs onto one of
+  their pixel grids (default: the earliest) with the same reprojection, sigma-clip
+  co-adds them, and runs the ordinary detection/catalogue/photometry/transient pipeline on
+  the deeper combined image - it comes back as a normal job, just with more of the frame's
+  faint stars above the noise. Frames are combined as they are, without a per-frame flux
+  normalisation step, so treat a stack's own photometry as indicative, not a replacement for
+  measuring each frame individually.
 
 ### Tuning the measurement
 

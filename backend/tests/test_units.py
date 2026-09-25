@@ -491,3 +491,181 @@ def test_survey_cutout_lands_on_our_pixel_grid(tmp_path, monkeypatch):
     # 20 original px across 40 output px: 6 px along +x of our frame -> 12 output px, same row
     j, i = _np.unravel_index(_np.argmax(out[:, :, 0]), out.shape[:2])
     assert abs(i - (20 + 12)) < 3 and abs(j - 20) < 3, (i, j)
+
+
+def test_align_resample_full_reprojects_a_second_frame_onto_the_reference_grid():
+    """The full-frame reprojection stacking relies on: a marker at a known sky position in a
+    rotated, differently-scaled "other" frame must land at the matching pixel of the
+    reference grid - same trick as the survey blink, just frame-to-frame instead of survey."""
+    from app import align
+
+    ref = WCS(naxis=2)
+    ref.wcs.crpix = [50, 50]
+    ref.wcs.crval = [150.0, 20.0]
+    ref.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    ref.wcs.cdelt = [-1 / 3600, 1 / 3600]
+
+    other = WCS(naxis=2)
+    other.wcs.crpix = [80, 80]
+    other.wcs.crval = [150.0, 20.0]
+    other.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    a = np.radians(15.0)
+    other.wcs.cd = np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]]) * (0.7 / 3600)
+
+    src = np.zeros((160, 160), np.float32)
+    ref_x, ref_y = 65.0, 50.0                       # 15 px east of the reference frame's centre
+    mark_ra, mark_dec = ref.all_pix2world([[ref_x, ref_y]], 0)[0]
+    sx, sy = other.all_world2pix([[mark_ra, mark_dec]], 0)[0]
+    src[int(round(sy)), int(round(sx))] = 1000.0
+
+    out = align.resample_full(ref, 100, 100, other, src)
+    assert out.shape == (100, 100)
+    j, i = np.unravel_index(np.nanargmax(out), out.shape)      # edge pixels off the source land as NaN
+    assert abs(i - ref_x) < 2 and abs(j - ref_y) < 2, (i, j)
+
+
+def test_multiframe_finds_a_mover_and_flags_a_stationary_unidentified():
+    from app import multiframe
+
+    # frame A: a mover at (10, 20) and a stationary unidentified source at (30, 40)
+    # frame B, one hour later: the mover has shifted 36" east (36"/h), the stationary one hasn't
+    frames = [
+        {"job_id": "a", "jd_mid": 2460000.0,
+         "candidates": [{"ra": 10.0, "dec": 20.0, "x": 1, "y": 1, "mag": 15.0, "snr": 20},
+                        {"ra": 30.0, "dec": 40.0, "x": 2, "y": 2, "mag": 14.0, "snr": 30}]},
+        {"job_id": "b", "jd_mid": 2460000.0 + 1 / 24,
+         "candidates": [{"ra": 10.0 + 0.01 / np.cos(np.radians(20.0)), "dec": 20.0, "x": 3, "y": 3,
+                         "mag": 15.0, "snr": 18},
+                        {"ra": 30.0, "dec": 40.0, "x": 4, "y": 4, "mag": 14.0, "snr": 29}]},
+    ]
+    out = multiframe.find_movers(frames, tol_arcsec=5.0)
+    assert len(out["movers"]) == 1
+    mover = out["movers"][0]
+    assert mover["confidence"] == "pair"
+    assert abs(mover["rate_arcsec_h"] - 36.0) < 2.0
+    assert [f["job_id"] for f in mover["frames"]] == ["a", "b"]
+
+    assert len(out["stationary_unidentified"]) == 1
+    assert out["stationary_unidentified"][0]["seen_in"] == ["a", "b"]
+
+
+def test_multiframe_chains_a_mover_across_three_frames():
+    from app import multiframe
+
+    rate = 20.0   # arcsec/hour, due east
+    frames = []
+    for i in range(3):
+        dt_h = i * 1.0
+        ra = 10.0 + (rate * dt_h / 3600.0) / np.cos(np.radians(20.0))
+        frames.append({"job_id": f"f{i}", "jd_mid": 2460000.0 + dt_h / 24.0,
+                       "candidates": [{"ra": ra, "dec": 20.0, "x": i, "y": i, "mag": 15.0, "snr": 20}]})
+    out = multiframe.find_movers(frames, tol_arcsec=3.0)
+    assert len(out["movers"]) == 1
+    assert out["movers"][0]["confidence"] == "track"
+    assert len(out["movers"][0]["frames"]) == 3
+    assert abs(out["movers"][0]["rate_arcsec_h"] - rate) < 2.0
+
+
+def test_images_near_finds_overlapping_fields_and_excludes_far_ones(tmp_path, monkeypatch):
+    from app import db
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.sqlite")
+    monkeypatch.setattr(db, "_conn", None)
+
+    def result(job_id, ra, dec):
+        return {"id": job_id, "status": "done", "filename": f"{job_id}.fits", "created": 1.0,
+                "time": {"jd_mid": 2460000.0, "utc_mid": "2000-01-01T00:00:00", "source": "fits"},
+                "solution": {"ra": ra, "dec": dec, "pixel_scale": 2.4, "fov_w_deg": 0.5, "fov_h_deg": 0.4}}
+
+    db.ingest(result("a" * 16, 150.0, 20.0), None)
+    db.ingest(result("b" * 16, 150.05, 20.02), None)      # a few arcmin away - overlapping field
+    db.ingest(result("c" * 16, 200.0, -10.0), None)        # a different part of the sky entirely
+
+    near = db.images_near(150.0, 20.0, radius_arcmin=30.0, exclude="a" * 16)
+    ids = [r["job_id"] for r in near]
+    assert "b" * 16 in ids and "c" * 16 not in ids and "a" * 16 not in ids
+
+
+def test_nearby_and_compare_routes(tmp_path, monkeypatch):
+    """Exercise main.job_nearby and main.compare_jobs the way the web UI calls them."""
+    import json as _json
+    from app import db, main
+
+    monkeypatch.setattr(main, "JOBS_DIR", tmp_path)
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.sqlite")
+    monkeypatch.setattr(db, "_conn", None)
+
+    def make_job(job_id, ra, dec, jd, cands):
+        d = tmp_path / job_id
+        d.mkdir()
+        result = {"id": job_id, "status": "done", "filename": f"{job_id}.fits", "created": 1.0,
+                  "time": {"jd_mid": jd, "utc_mid": "2000-01-01T00:00:00", "source": "fits"},
+                  "solution": {"ra": ra, "dec": dec, "pixel_scale": 2.4, "fov_w_deg": 0.5, "fov_h_deg": 0.4},
+                  "candidates": cands}
+        (d / "result.json").write_text(_json.dumps(result))
+        (d / "wcs.fits").write_bytes(b"placeholder - only its existence is checked by /nearby")
+        db.ingest(result, None)
+        return result
+
+    make_job("a" * 16, 150.0, 20.0, 2460000.0,
+            [{"status": "unidentified", "ra": 150.01, "dec": 20.0, "mag": 15.0, "snr": 10}])
+    make_job("b" * 16, 150.02, 20.01, 2460000.0 + 1 / 24,
+            [{"status": "unidentified", "ra": 150.01 + 0.01, "dec": 20.0, "mag": 15.0, "snr": 10}])
+    make_job("c" * 16, 200.0, -10.0, 2460000.0, [])       # unrelated field
+
+    nearby = main.job_nearby("a" * 16)
+    assert [r["job_id"] for r in nearby] == ["b" * 16]
+
+    cmp = main.compare_jobs(jobs="a" * 16 + "," + "b" * 16, tol_arcsec=5.0, max_rate_arcsec_h=2000.0)
+    assert len(cmp["movers"]) == 1
+    assert set(f["job_id"] for f in cmp["movers"][0]["frames"]) == {"a" * 16, "b" * 16}
+
+
+def test_stack_combines_frames_and_runs_the_normal_pipeline():
+    """run_stack should align (identical WCS here, so an identity reprojection), co-add, and
+    hand off to the same catalogue/photometry/transient stages a single-image job uses."""
+    import tempfile
+    from app import pipeline
+
+    wcs = WCS(naxis=2)
+    wcs.wcs.crpix = [100, 100]
+    wcs.wcs.crval = [150.0, 20.0]
+    wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    wcs.wcs.cdelt = [-1 / 3600, 1 / 3600]
+
+    rng = np.random.default_rng(1)
+    base = np.full((200, 200), 100.0, np.float32)
+    yy, xx = np.mgrid[0:200, 0:200]
+    stars = [(60, 70), (140, 130), (100, 40), (30, 150), (170, 90), (80, 180), (150, 60), (40, 40),
+            (110, 160), (170, 30)]
+    sig = 2.0 / 2.355
+    for x, y in stars:
+        base += 8000.0 / (2 * np.pi * sig ** 2) * np.exp(-((xx - x) ** 2 + (yy - y) ** 2) / (2 * sig ** 2))
+
+    class FakeJob:
+        def __init__(self):
+            self.result = {"id": "s" * 16, "log": []}
+            self.filename = "stack"
+
+        def set_stage(self, stage, progress):
+            self.result.update(stage=stage, progress=progress)
+
+        def log(self, msg):
+            self.result["log"].append(msg)
+
+        def save(self):
+            pass
+
+    sources = [{"job_id": f"src{seed}", "data": rng.poisson(base).astype(np.float32), "wcs": wcs,
+               "band": "TG", "saturation": 60000.0, "linear": True, "jd_mid": 2460000.0 + seed}
+              for seed in (1, 2)]
+
+    job = FakeJob()
+    with tempfile.TemporaryDirectory() as td:
+        pipeline.run_stack(job, {"photometry": "false", "transients": "false"}, Path(td), job.log, sources)
+
+    res = job.result
+    assert res["file"]["format"] == "stack"
+    assert res["stack"] == {"of": ["src1", "src2"], "n": 2, "reference": "src1"}
+    assert res["solution"]["ra"] == pytest.approx(150.0, abs=1e-3)
+    assert res["detections"]["count"] >= 8
