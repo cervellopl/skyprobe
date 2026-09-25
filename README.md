@@ -8,8 +8,8 @@ Web app + REST API + Android client that take a single sky image from a **phone*
    nova.astrometry.net);
 2. **search the field for objects that are not in the catalogues** — candidate novae,
    supernovae, comets and uncatalogued moving objects, with known asteroids/comets
-   (IMCCE SkyBoT), known variables (AAVSO VSX) and galaxies (HyperLEDA) identified and
-   labelled instead of reported as new;
+   (IMCCE SkyBoT), known variables (AAVSO VSX), galaxies (HyperLEDA) and nebulae/star
+   clusters/further galaxies (NGC/IC) identified and labelled instead of reported as new;
 3. **do photometry of every catalogued variable star in the field** — aperture photometry
    calibrated against a Gaia DR3 / Tycho-2 ensemble, exportable as an
    **AAVSO Extended Format** report;
@@ -88,9 +88,9 @@ target, so you can send a photo to SkyProbe straight from the gallery.
 | **Load** | JPEG/PNG/HEIC via Pillow (+pillow-heif), camera RAW via rawpy/LibRaw (**DNG** — both the ordinary Bayer kind and the already-demosaiced "linear DNG" that Apple ProRAW and some Android computational-RAW pipelines write — plus CR2/CR3, NEF, ARW, ORF, RW2, RAF…), FITS via astropy. Colour data is reduced to the **green channel at full resolution** (AAVSO *TG* band): Bayer frames are interpolated, not binned, so pixel geometry — and therefore the WCS — stays valid. JPEG/HEIC are linearised with the inverse sRGB curve and flagged as approximate. EXIF/FITS give exposure, time, focal length, pixel size and GPS. |
 | **Detect** | SEP (SExtractor) background mesh + extraction, half-light radii → FWHM, saturation and edge flags. Lit **foreground** (buildings, trees, the ground in a landscape astrophoto) is found from block texture plus connected-component analysis and excluded from solving, photometry and the transient search. |
 | **Solve** | Fields wider than ~30° are solved on the **central part of the frame** first, because a phone lens is nowhere near the gnomonic projection a solver assumes; the solution is then extended to the whole frame by matching catalogue stars and fitting a sigma-clipped **SIP distortion polynomial** (on a real 86°×65° Galaxy S25 frame this brings the residual from ~5 px down to ~1 px). The *source list* (not the image) is sent to `solve-field` / nova, so a 50 MB RAW solves as fast as a JPEG and the WCS applies to full-resolution pixels. Hints: pixel scale from EXIF 35 mm-equivalent focal length, FITS `FOCALLEN`/`XPIXSZ`, or a device preset (Seestar S50 2.39″/px, S30 3.99″/px); RA/Dec from the FITS header. Each attempt falls back to a blinder one. A WCS already present in a FITS header is verified against Gaia before it is trusted. |
-| **Catalogues** | Gaia DR3 for fields ≲2.5° radius, Tycho-2 for wide phone fields (VizieR truncates huge Gaia cones), AAVSO VSX for variables, IMCCE SkyBoT for minor bodies at the exposure time (tiled in parallel for wide fields), HyperLEDA for galaxies. The magnitude limit is chosen from the pixel scale, field area and galactic latitude, and everything is cached on disk. |
+| **Catalogues** | Gaia DR3 for fields ≲2.5° radius, Tycho-2 for wide phone fields (VizieR truncates huge Gaia cones), AAVSO VSX for variables, IMCCE SkyBoT for minor bodies at the exposure time (tiled in parallel for wide fields), HyperLEDA for galaxies, NGC/IC (NGC2000.0) for the galaxies, nebulae and star clusters bright/large enough to have a common name. The magnitude limit is chosen from the pixel scale, field area and galactic latitude, and everything is cached on disk. |
 | **Photometry** | Aperture photometry (r ≈ 1.4 FWHM, local sky annulus). Comparison stars: isolated, unsaturated, non-variable catalogue stars transformed to Johnson *V* with the published Gaia DR3 polynomials. A sigma-clipped **zero point + colour term** is fitted globally; a **local correction** from the ~25 nearest comparison stars absorbs vignetting and differential extinction across wide fields. Each variable is measured by forced photometry at its VSX position (upper limit if SNR < 5), with a check star and airmass, and exported in AAVSO Extended Format. |
-| **New objects** | Every detection is matched against the reference catalogue. Leftovers are screened for hot pixels, cosmic rays, satellite trails, edges, saturation halos and blends, and must be brighter than the catalogue depth (otherwise "not in the catalogue" is meaningless). Survivors are classified: *known minor planet/comet* (SkyBoT), *known variable* (VSX), *galaxy* (HyperLEDA), *unidentified diffuse* (possible comet, re-measured with a coma-sized aperture), *unidentified star-like* (possible nova/supernova), or *brightening* — a catalogued star ≥1.5 mag brighter than predicted, i.e. a possible outburst. |
+| **New objects** | Every detection is matched against the reference catalogue. Leftovers are screened for hot pixels, cosmic rays, satellite trails, edges, saturation halos and blends, and must be brighter than the catalogue depth (otherwise "not in the catalogue" is meaningless). Survivors are classified: *known minor planet/comet* (SkyBoT), *known variable* (VSX), *galaxy* (HyperLEDA), *known galaxy/nebula/star cluster* (NGC/IC, for the diffuse ones HyperLEDA doesn't cover — planetary and diffuse nebulae, open and globular clusters, and any bright galaxy by its common name), *unidentified diffuse* (possible comet, re-measured with a coma-sized aperture), *unidentified star-like* (possible nova/supernova), or *brightening* — a catalogued star ≥1.5 mag brighter than predicted, i.e. a possible outburst. |
 
 ### Accuracy, and what this cannot do
 
@@ -335,6 +335,6 @@ python tests/run_local.py /tmp/syn/seestar_sscyg.fits     # full pipeline, no se
 
 ## Credits
 
-astrometry.net (Lang, Hogg, Mierle, Blanton & Roweis) · Gaia DR3 and Tycho-2, AAVSO VSX
-and HyperLEDA via VizieR (CDS, Strasbourg) · IMCCE SkyBoT · SEP/SExtractor · astropy,
-photutils, rawpy, Pillow.
+astrometry.net (Lang, Hogg, Mierle, Blanton & Roweis) · Gaia DR3 and Tycho-2, AAVSO VSX,
+HyperLEDA and NGC2000.0 (Dreyer, rev. Sinnott) via VizieR (CDS, Strasbourg) · IMCCE SkyBoT ·
+SEP/SExtractor · astropy, photutils, rawpy, Pillow.

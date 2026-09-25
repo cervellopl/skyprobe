@@ -3,9 +3,12 @@
 Every detected source is cross-matched with Gaia DR3. What is left over is
 screened for artefacts (hot pixels, cosmic rays, satellite trails, edges,
 saturation halos) and then identified against:
-  * IMCCE SkyBoT  -> known asteroids / comets at the time of exposure
-  * AAVSO VSX     -> known variables (incl. catalogued novae)
-  * HyperLEDA PGC -> galaxies (diffuse candidates)
+  * IMCCE SkyBoT   -> known asteroids / comets at the time of exposure
+  * AAVSO VSX      -> known variables (incl. catalogued novae)
+  * HyperLEDA PGC  -> galaxies (diffuse candidates)
+  * NGC/IC (NGC2000.0) -> galaxies, nebulae and star clusters still unmatched by the above -
+                          a diffuse candidate landing on a named nebula or cluster is that
+                          object, not an uncatalogued comet
 Catalogued stars that appear much brighter than Gaia predicts are reported as
 possible outbursts.
 """
@@ -17,7 +20,7 @@ import numpy as np
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 
-from .catalogs import band_mag, pgc_galaxies_near
+from .catalogs import band_mag, dso_near, pgc_galaxies_near
 from .photometry import Apertures, aperture_radii, measure
 
 
@@ -162,6 +165,13 @@ def search(wcs, det: dict, gaia, vsx, minor_bodies: list, cal, fwhm, pixel_scale
             for q in gal:
                 candidates[diffuse_idx[q]]["known"] = {"catalog": "HyperLEDA", "name": "galaxy (PGC)",
                                                        "class": "galaxy"}
+            # HyperLEDA is galaxies only - anything still diffuse and unidentified might be a
+            # named nebula or star cluster instead (HyperLEDA also misses some bright, large,
+            # well-known galaxies that NGC2000 catches by their common name)
+            still_diffuse = [i for i in diffuse_idx if "known" not in candidates[i]]
+            if still_diffuse:
+                for q, info in dso_near(cc[still_diffuse], radius_arcsec=max(300.0, 3 * match_r)).items():
+                    candidates[still_diffuse[q]]["known"] = info
 
     for c in candidates:
         c["status"] = "known" if "known" in c else "unidentified"
@@ -178,6 +188,8 @@ def _label(c):
             return f"Known {'comet' if 'omet' in k['class'] else 'minor planet'}: {k['name']}"
         if k["catalog"] == "VSX":
             return f"Known variable {k['name']} ({k['class']})"
+        if k["catalog"] == "NGC/IC":
+            return f"Known {k['class']}: {k['name']}"
         return "Galaxy (HyperLEDA)"
     if c["kind"] == "diffuse":
         return "Unidentified diffuse object - possible comet"

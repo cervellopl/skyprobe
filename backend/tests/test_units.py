@@ -669,3 +669,54 @@ def test_stack_combines_frames_and_runs_the_normal_pipeline():
     assert res["stack"] == {"of": ["src1", "src2"], "n": 2, "reference": "src1"}
     assert res["solution"]["ra"] == pytest.approx(150.0, abs=1e-3)
     assert res["detections"]["count"] >= 8
+
+
+def test_dso_near_identifies_nebulae_and_clusters_but_not_bare_stars(monkeypatch):
+    """NGC2000.0 lists plenty of plain stars and "?"/nonexistent entries too - only a real
+    galaxy/nebula/cluster type code should come back as a known object. Also covers two real
+    bugs found by live-testing against the actual catalogue: an "IC" name with no space before
+    the number (e.g. "I1296"), and more than one object inside the search radius of the same
+    coordinate (the closest one, by actual separation, must win - not whichever row VizieR
+    happens to list first)."""
+    from astropy.coordinates import SkyCoord as _SkyCoord
+
+    from app import catalogs
+
+    fake = Table({
+        "Name":    ["6205",    "I 434",     "1976",  "9999",  "I1296",     "6720"],
+        "Type":    ["Gb",      "Nb",        "*",     "?",     "Gx",        "Pl"],
+        "RAB2000": ["16 41.7", "05 41.0",   "05 41.6", "00 00.0", "18 53.3", "18 53.6"],
+        "DEB2000": ["+36 28",  "-02 24",    "-02 14",  "+00 00",  "+33 04",  "+33 02"],
+        "_q":      [1,          2,           3,         4,         5,         5],
+    })
+
+    def fake_query_region(self, coords, radius=None, catalog=None):
+        assert catalog == "VII/118/ngc2000"
+        return [fake]
+
+    # astroquery.vizier.Vizier is a pre-built VizierClass *instance*, not the class itself -
+    # catalogs.py's `Vizier(columns=...)` calls VizierClass.__call__ to get a fresh instance,
+    # so the class itself is what has to be patched for that fresh instance to see it too.
+    monkeypatch.setattr("astroquery.vizier.core.VizierClass.query_region", fake_query_region)
+    coords = _SkyCoord(
+        ["16 41.7", "05 41.0", "05 41.6", "00 00.0", "18 53.6"],
+        ["+36 28", "-02 24", "-02 14", "+00 00", "+33 02"],
+        unit=("hourangle", "deg"),
+    )
+    out = catalogs.dso_near(coords)
+    assert out[0] == {"catalog": "NGC/IC", "name": "NGC 6205", "class": "globular cluster"}
+    assert out[1] == {"catalog": "NGC/IC", "name": "IC 434", "class": "nebula"}
+    assert 2 not in out and 3 not in out       # a plain star and an uncertain/nonexistent entry
+    # coordinate 5 (query index 4) sits exactly on NGC 6720, closer than the nearby IC 1296
+    assert out[4] == {"catalog": "NGC/IC", "name": "NGC 6720", "class": "planetary nebula"}
+
+
+def test_label_for_a_known_ngc_object():
+    """A diffuse candidate matched to NGC/IC (a nebula or cluster HyperLEDA does not cover,
+    since HyperLEDA is galaxies only) must be labelled as that, not as a possible comet."""
+    from app import transients
+
+    c = {"kind": "diffuse", "known": {"catalog": "NGC/IC", "name": "NGC 7000", "class": "nebula"}}
+    assert transients._label(c) == "Known nebula: NGC 7000"
+    c = {"kind": "diffuse", "known": {"catalog": "NGC/IC", "name": "NGC 6205", "class": "globular cluster"}}
+    assert transients._label(c) == "Known globular cluster: NGC 6205"

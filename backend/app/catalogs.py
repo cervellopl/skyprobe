@@ -266,3 +266,60 @@ def pgc_galaxies_near(coords: SkyCoord, radius_arcsec: float = 30) -> set[int]:
     if len(res) == 0 or "_q" not in res[0].colnames:
         return set()
     return {int(q) - 1 for q in np.asarray(res[0]["_q"])}
+
+
+# NGC2000.0 object-type codes worth reporting as a known deep-sky object; everything else
+# (bare/double/triple stars, asterisms, galaxy knots, blank or "?"/"-" uncertain entries -
+# many of the original Dreyer NGC numbers turned out to be nonexistent) is not a distinct
+# object and is left for the candidate to be identified some other way, or stay unidentified.
+_NGC_TYPES = {
+    "Gx": "galaxy", "OC": "open cluster", "Gb": "globular cluster",
+    "Nb": "nebula", "Pl": "planetary nebula", "C+N": "cluster with nebulosity",
+}
+
+
+def dso_near(coords: SkyCoord, radius_arcsec: float = 300.0) -> dict[int, dict]:
+    """NGC/IC galaxies, nebulae and star clusters near each of `coords`.
+
+    NGC2000.0 positions are only good to about 1 arcminute (they come from the original
+    19th-century Dreyer compilation) - and for a large object the catalogued "position" is
+    itself a judgement call, sometimes several arcminutes from the coordinate another source
+    quotes (M42's listed centre and the Trapezium are 4' apart, for a nebula 66' across). The
+    default radius is generous for that reason; a truly huge object's outer reaches can still
+    fall outside it, but a diffuse candidate detected as one compact blob is realistically
+    nowhere near that large to begin with. Returns
+    `{index into coords: {"catalog": "NGC/IC", "name": "NGC 6205", "class": "globular cluster"}}`
+    for the closest reported match of each coordinate that lands on a real object type.
+    """
+    if len(coords) == 0:
+        return {}
+    from astroquery.vizier import Vizier
+
+    v = Vizier(columns=["Name", "Type", "RAB2000", "DEB2000", "_q"], row_limit=-1, timeout=120)
+    v.VIZIER_SERVER = VIZIER_SERVER
+    try:
+        res = v.query_region(coords, radius=radius_arcsec * u.arcsec, catalog="VII/118/ngc2000")
+    except Exception:
+        return {}
+    if len(res) == 0 or "_q" not in res[0].colnames:
+        return {}
+    # more than one object can fall inside a several-arcminute radius (e.g. the galaxy IC 1296
+    # sits under 2' from the Ring Nebula) - row order is not distance order, so the actual
+    # separation has to be checked to keep the closest real match for each coordinate
+    best: dict[int, tuple[float, dict]] = {}
+    for row in res[0]:
+        cls = _NGC_TYPES.get(str(row["Type"]).strip())
+        if cls is None:
+            continue
+        idx = int(row["_q"]) - 1
+        try:
+            pos = SkyCoord(f"{row['RAB2000']} {row['DEB2000']}", unit=(u.hourangle, u.deg))
+        except Exception:
+            continue
+        sep = float(coords[idx].separation(pos).arcsec)
+        if idx in best and best[idx][0] <= sep:
+            continue
+        raw = str(row["Name"]).strip()
+        name = f"IC {raw[1:].strip()}" if raw[:1] == "I" else f"NGC {raw}"
+        best[idx] = (sep, {"catalog": "NGC/IC", "name": name, "class": cls})
+    return {i: info for i, (_sep, info) in best.items()}
