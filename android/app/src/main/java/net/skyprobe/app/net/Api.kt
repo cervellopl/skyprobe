@@ -8,6 +8,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import okhttp3.FormBody
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
@@ -215,6 +216,46 @@ data class RestoreReport(
 @Serializable
 data class LightCurve(val name: String = "", val points: List<CurvePoint> = emptyList())
 
+/** Another finished, solved job whose field overlaps this one's - to blink, compare or stack against. */
+@Serializable
+data class NearbyImage(
+    @SerialName("job_id") val jobId: String = "", val filename: String = "",
+    val created: Double = 0.0, @SerialName("jd_mid") val jdMid: Double? = null,
+    @SerialName("utc_mid") val utcMid: String = "", val ra: Double = 0.0, val dec: Double = 0.0,
+    @SerialName("pixel_scale") val pixelScale: Double = 0.0,
+    @SerialName("fov_w_deg") val fovW: Double = 0.0, @SerialName("fov_h_deg") val fovH: Double = 0.0,
+    @SerialName("separation_arcmin") val separationArcmin: Double = 0.0,
+)
+
+@Serializable
+data class MoverFrame(
+    @SerialName("job_id") val jobId: String = "", val jd: Double = 0.0,
+    val x: Double = 0.0, val y: Double = 0.0, val ra: Double = 0.0, val dec: Double = 0.0,
+    val mag: Double? = null, val snr: Double? = null,
+)
+
+/** A candidate that moved a plausible amount between two or more of the frames' epochs. */
+@Serializable
+data class Mover(
+    val frames: List<MoverFrame> = emptyList(),
+    @SerialName("rate_arcsec_h") val rateArcsecH: Double = 0.0,
+    @SerialName("direction_deg") val directionDeg: Double = 0.0,
+    val confidence: String = "",
+)
+
+/** Unidentified in every frame supplied, but did not move - a possible nova/supernova. */
+@Serializable
+data class StationaryUnidentified(
+    val ra: Double = 0.0, val dec: Double = 0.0,
+    @SerialName("seen_in") val seenIn: List<String> = emptyList(), val label: String = "",
+)
+
+@Serializable
+data class CompareResult(
+    val movers: List<Mover> = emptyList(),
+    @SerialName("stationary_unidentified") val stationaryUnidentified: List<StationaryUnidentified> = emptyList(),
+)
+
 /** The server refused to compose a posting (e.g. a non-linear camera response). */
 class BlockedException(message: String) : IOException(message)
 
@@ -314,6 +355,26 @@ class SkyProbeApi(baseUrl: String, private val token: String? = null) {
 
     suspend fun dbStar(name: String): LightCurve =
         get("$base/api/db/star/${java.net.URLEncoder.encode(name, "UTF-8")}") { json.decodeFromString(it) }
+
+    /** Other finished, solved jobs whose field overlaps this one's. */
+    suspend fun nearby(jobId: String): List<NearbyImage> =
+        get("$base/api/jobs/$jobId/nearby") { json.decodeFromString(it) }
+
+    /** Candidate movers / unmoved-but-uncatalogued sources across 2+ jobs of the same field. */
+    suspend fun compare(jobIds: List<String>, tolArcsec: Double = 8.0, maxRateArcsecH: Double = 1500.0): CompareResult {
+        val ids = jobIds.joinToString(",") { java.net.URLEncoder.encode(it, "UTF-8") }
+        return get("$base/api/compare?jobs=$ids&tol_arcsec=$tolArcsec&max_rate_arcsec_h=$maxRateArcsecH") { json.decodeFromString(it) }
+    }
+
+    /** Aligns and co-adds several already-analysed jobs into one deeper job, like a fresh upload. */
+    suspend fun stack(jobIds: List<String>): Upload = withContext(Dispatchers.IO) {
+        val body = FormBody.Builder().add("job_ids", jobIds.joinToString(",")).build()
+        client.newCall(req("$base/api/stack").post(body).build()).execute().use { r ->
+            val text = r.body?.string().orEmpty()
+            if (!r.isSuccessful) throw IOException(errorMessage(text, r.code))
+            json.decodeFromString<Upload>(text)
+        }
+    }
 
     /** Composes (never sends) a vsnet-obs posting for this job. */
     suspend fun vsnet(jobId: String, observer: String, site: String, instrument: String,

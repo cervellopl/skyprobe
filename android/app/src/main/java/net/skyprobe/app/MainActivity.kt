@@ -1,16 +1,22 @@
 package net.skyprobe.app
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import net.skyprobe.app.ui.AppScaffold
 import net.skyprobe.app.ui.SkyProbeTheme
@@ -28,6 +34,18 @@ class MainActivity : ComponentActivity() {
                 Surface(modifier = Modifier) {
                     AppScaffold(state = state, vm = vm)
                 }
+                // Without this, an upload/analysis still survives the screen turning off (the
+                // foreground service still runs), but its notification stays invisible on
+                // Android 13+ until the user grants it from system settings.
+                val askNotifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+                LaunchedEffect(Unit) {
+                    if (Build.VERSION.SDK_INT >= 33 &&
+                        ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS)
+                            != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        askNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    }
+                }
             }
         }
     }
@@ -40,20 +58,21 @@ class MainActivity : ComponentActivity() {
 
     /**
      * Images arriving from another app: "Share" from any gallery or file manager
-     * (ACTION_SEND / ACTION_SEND_MULTIPLE) and "Open with" (ACTION_VIEW).
+     * (ACTION_SEND / ACTION_SEND_MULTIPLE, one or several images at once) and "Open with"
+     * (ACTION_VIEW, always one).
      */
     private fun handleIncoming(intent: Intent?) {
         if (intent == null) return
         if (intent.type?.startsWith("text/") == true) return
-        val uri = when (intent.action) {
-            Intent.ACTION_SEND -> intent.stream(Intent.EXTRA_STREAM)
-            Intent.ACTION_SEND_MULTIPLE -> intent.streams().firstOrNull()
-            Intent.ACTION_VIEW -> intent.data
-            else -> null
-        } ?: return
-        val extra = if (intent.action == Intent.ACTION_SEND_MULTIPLE) intent.streams().size else 1
-        vm.importImage(uri, sharedBatch = extra)
-        // consume it, so a configuration change does not re-import the same picture
+        val uris = when (intent.action) {
+            Intent.ACTION_SEND -> intent.stream(Intent.EXTRA_STREAM)?.let { listOf(it) } ?: emptyList()
+            Intent.ACTION_SEND_MULTIPLE -> intent.streams()
+            Intent.ACTION_VIEW -> intent.data?.let { listOf(it) } ?: emptyList()
+            else -> emptyList()
+        }
+        if (uris.isEmpty()) return
+        vm.importImages(uris)
+        // consume it, so a configuration change does not re-import the same picture(s)
         intent.action = null
     }
 

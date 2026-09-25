@@ -52,6 +52,9 @@ import net.skyprobe.app.NOT_CONFIGURED
 import net.skyprobe.app.Phone
 import net.skyprobe.app.UiState
 import net.skyprobe.app.net.Candidate
+import net.skyprobe.app.net.CompareResult
+import net.skyprobe.app.net.Mover
+import net.skyprobe.app.net.NearbyImage
 import net.skyprobe.app.net.Survey
 import net.skyprobe.app.net.JobResult
 import net.skyprobe.app.net.MinorBody
@@ -114,7 +117,12 @@ fun AppScaffold(state: UiState, vm: AppViewModel) {
 
 @Composable
 private fun HomeScreen(state: UiState, vm: AppViewModel) {
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { vm.importImage(it) }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { vm.importImages(it) }
+    val label = when {
+        state.picked.isEmpty() -> "Choose image(s)"
+        state.picked.size == 1 -> state.picked[0].name
+        else -> "${state.picked.size} images selected"
+    }
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -127,12 +135,13 @@ private fun HomeScreen(state: UiState, vm: AppViewModel) {
                 Text(
                     "Phone or Seestar frame (JPEG, HEIC, RAW or FITS). The server plate-solves it with " +
                         "astrometry.net, measures every catalogued variable star in the field and looks for " +
-                        "objects that are not in the catalogues.",
+                        "objects that are not in the catalogues. Pick several exposures of the same field to " +
+                        "blink, compare for movers, or stack them once each is analysed.",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 OutlinedButton(onClick = { picker.launch("*/*") }, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Default.Image, null); Spacer(Modifier.width(8.dp))
-                    Text(if (state.pickedName.isBlank()) "Choose image" else state.pickedName, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 DevicePicker(state, vm)
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -145,13 +154,15 @@ private fun HomeScreen(state: UiState, vm: AppViewModel) {
                 }
                 Button(
                     onClick = { vm.analyse() },
-                    enabled = state.pickedUri != null && !state.busy,
+                    enabled = state.picked.isNotEmpty() && !state.busy,
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("Analyse") }
+                ) { Text(if (state.picked.size > 1) "Analyse ${state.picked.size} images" else "Analyse") }
             }
         }
 
-        if (state.busy || state.job != null) {
+        if (state.queue.isNotEmpty()) UploadQueueCard(state)
+
+        if (state.queue.isEmpty() && (state.busy || state.job != null)) {
             val job = state.job
             ElevatedCard {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -186,6 +197,31 @@ private fun HomeScreen(state: UiState, vm: AppViewModel) {
                         Text(lines.joinToString("\n"), fontFamily = FontFamily.Monospace,
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+                }
+            }
+        }
+    }
+}
+
+/** Per-file status while several images are uploaded and analysed one at a time. */
+@Composable
+private fun UploadQueueCard(state: UiState) {
+    ElevatedCard {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Analysing ${state.queue.size} images", fontWeight = FontWeight.SemiBold)
+            state.queue.forEach { q ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(q.name, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.bodySmall)
+                    val label = when (q.status) {
+                        "done" -> "done"
+                        "failed" -> q.error ?: "failed"
+                        "running" -> "${q.progress}%"
+                        "uploading" -> "uploading…"
+                        else -> "waiting…"
+                    }
+                    Text(label, style = MaterialTheme.typography.labelSmall,
+                        color = if (q.status == "failed") Danger else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
@@ -266,8 +302,13 @@ private fun ResultScreen(job: JobResult, vm: AppViewModel) {
     var candSort by remember { mutableStateOf(CandSort.BRIGHT) }
     var newOnly by remember { mutableStateOf(false) }
     val uri = LocalUriHandler.current
+    var nearby by remember(job.id) { mutableStateOf<List<NearbyImage>>(emptyList()) }
+    LaunchedEffect(job.id) {
+        nearby = if (job.solution != null) runCatching { vm.nearby(job.id) }.getOrDefault(emptyList()) else emptyList()
+    }
     val thumbs = Thumbs(vm, job.id, brightness, contrast, exposureLine(job),
-        solved = job.solution != null, surveys = vm.state.collectAsState().value.health?.surveys.orEmpty())
+        solved = job.solution != null, surveys = vm.state.collectAsState().value.health?.surveys.orEmpty(),
+        nearby = nearby)
 
     val variables = remember(job, query, varSort, measuredOnly, unflaggedOnly) {
         job.variables
@@ -305,7 +346,7 @@ private fun ResultScreen(job: JobResult, vm: AppViewModel) {
             )
     }
     val tabs = listOf("New objects (${job.unidentified})", "Variables (${job.variables.size})",
-        "Minor bodies (${job.minorBodies.size})", "Details")
+        "Minor bodies (${job.minorBodies.size})", "Compare (${nearby.size})", "Details")
 
     // One scrolling list for the whole screen: the preview and the summary scroll away
     // instead of permanently occupying the space the data needs, and the tabs stay on top.
@@ -369,6 +410,7 @@ private fun ResultScreen(job: JobResult, vm: AppViewModel) {
                 }
                 minorBodyItems(bodies, job.time != null, thumbs)
             }
+            3 -> compareItems(job, nearby, vm)
             else -> detailItems(job)
         }
         item(key = "tail") { Spacer(Modifier.height(24.dp)) }
@@ -608,7 +650,7 @@ private fun DisplayRow(brightness: Float, contrast: Float, onBrightness: (Float)
 /** Builds close-up URLs that follow the current brightness and contrast. */
 private class Thumbs(val vm: AppViewModel, val jobId: String, val brightness: Float, val contrast: Float,
                      val exposure: String = "", val solved: Boolean = true,
-                     val surveys: List<Survey> = emptyList()) {
+                     val surveys: List<Survey> = emptyList(), val nearby: List<NearbyImage> = emptyList()) {
     fun url(x: Double, y: Double, size: Int = 90, zoom: Int = 4, original: Boolean = false) =
         vm.api.fileUrl(jobId, "cutout.jpg") +
             "?x=$x&y=$y&size=$size&zoom=$zoom&brightness=$brightness&contrast=$contrast" +
@@ -618,10 +660,15 @@ private class Thumbs(val vm: AppViewModel, val jobId: String, val brightness: Fl
     fun surveyUrl(x: Double, y: Double, survey: String, size: Int = 90, zoom: Int = 4) =
         vm.api.fileUrl(jobId, "dss.jpg") + "?x=$x&y=$y&size=$size&zoom=$zoom&survey=$survey"
 
+    /** The same patch from another of the user's own analysed jobs - for blinking your own images. */
+    fun alignUrl(x: Double, y: Double, withJobId: String, size: Int = 90, zoom: Int = 4) =
+        vm.api.fileUrl(jobId, "align.jpg") + "?x=$x&y=$y&size=$size&zoom=$zoom&with=$withJobId"
+
     fun surveyLabel(id: String) = surveys.firstOrNull { it.id == id }?.label ?: id.uppercase()
+    fun nearbyLabel(id: String?) = nearby.firstOrNull { it.jobId == id }?.filename?.ifBlank { null } ?: id?.take(8) ?: "your other image"
 }
 
-private enum class Compare { IMAGE, SURVEY, BLINK }
+private enum class Compare { IMAGE, SURVEY, MINE, BLINK }
 
 /**
  * The close-up, with a switch to the original resolution. The preview is instant; the
@@ -638,33 +685,48 @@ private fun exposureLine(job: JobResult): String = listOfNotNull(
 private fun Thumb(thumbs: Thumbs, x: Double, y: Double, label: String) {
     var original by remember { mutableStateOf(false) }
     var mode by remember { mutableStateOf(Compare.IMAGE) }
-    var onSurvey by remember { mutableStateOf(false) }
+    var second by remember { mutableStateOf(Compare.SURVEY) }      // which mode BLINK alternates against
+    var onSecond by remember { mutableStateOf(false) }
+    var otherJob by remember(thumbs.nearby) { mutableStateOf(thumbs.nearby.firstOrNull()?.jobId) }
     val survey = thumbs.vm.state.collectAsState().value.settings.survey
-    LaunchedEffect(mode) {
-        if (mode != Compare.BLINK) { onSurvey = mode == Compare.SURVEY; return@LaunchedEffect }
-        while (true) { onSurvey = !onSurvey; kotlinx.coroutines.delay(900) }
+    val active = if (mode == Compare.BLINK) second else mode        // the source actually shown as "second"
+    LaunchedEffect(mode, second) {
+        if (mode != Compare.BLINK) { onSecond = mode == Compare.SURVEY || mode == Compare.MINE; return@LaunchedEffect }
+        while (true) { onSecond = !onSecond; kotlinx.coroutines.delay(900) }
     }
     Column {
         Box(Modifier.fillMaxWidth().height(180.dp).clip(RoundedCornerShape(8.dp)).background(Color.Black)) {
             // both images are kept loaded, so blinking does not flash an empty frame
             AsyncImage(
                 model = thumbs.url(x, y, original = original), contentDescription = "Close-up of $label",
-                modifier = Modifier.fillMaxSize().alpha(if (onSurvey) 0f else 1f),
+                modifier = Modifier.fillMaxSize().alpha(if (onSecond) 0f else 1f),
             )
             if (thumbs.solved && mode != Compare.IMAGE) {
-                AsyncImage(
-                    model = thumbs.surveyUrl(x, y, survey),
-                    contentDescription = "${thumbs.surveyLabel(survey)} image of the same field",
-                    modifier = Modifier.fillMaxSize().alpha(if (onSurvey) 1f else 0f),
-                )
+                val secondUrl = when (active) {
+                    Compare.MINE -> otherJob?.let { thumbs.alignUrl(x, y, it) }
+                    Compare.SURVEY -> thumbs.surveyUrl(x, y, survey)
+                    else -> null
+                }
+                if (secondUrl != null) {
+                    AsyncImage(
+                        model = secondUrl,
+                        contentDescription = if (active == Compare.MINE) "your other image of the same field"
+                                            else "${thumbs.surveyLabel(survey)} image of the same field",
+                        modifier = Modifier.fillMaxSize().alpha(if (onSecond) 1f else 0f),
+                    )
+                }
             }
-            Text(if (onSurvey) thumbs.surveyLabel(survey) else "your image",
+            Text(
+                if (!onSecond) "your image" else if (active == Compare.MINE) thumbs.nearbyLabel(otherJob) else thumbs.surveyLabel(survey),
                 style = MaterialTheme.typography.labelSmall, color = Color.White,
                 modifier = Modifier.align(Alignment.BottomStart)
                     .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(topEnd = 6.dp))
                     .padding(horizontal = 6.dp, vertical = 2.dp))
         }
-        if (thumbs.solved) SurveyRow(thumbs, mode) { mode = it }
+        if (thumbs.solved) {
+            SurveyRow(thumbs, mode, { mode = it; if (it == Compare.SURVEY || it == Compare.MINE) second = it },
+                active, otherJob) { otherJob = it }
+        }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(original, { original = it })
             Text(if (original) "full resolution" else "preview (tap for full resolution)",
@@ -680,33 +742,53 @@ private fun Thumb(thumbs: Thumbs, x: Double, y: Double, label: String) {
 }
 
 /**
- * Image / survey / blink, plus which survey to blink against. Blinking is how an observer
- * tells a real new object from a plate flaw: the background stays put, the object does not.
+ * Image / survey / mine / blink, plus which survey or which of the user's other analysed
+ * images to blink against. Blinking is how an observer tells a real new object from a plate
+ * flaw: the background stays put, the object does not - whether the second image is a decades-
+ * old survey plate or another exposure the user took of the same field.
  */
 @Composable
-private fun SurveyRow(thumbs: Thumbs, mode: Compare, onMode: (Compare) -> Unit) {
+private fun SurveyRow(thumbs: Thumbs, mode: Compare, onMode: (Compare) -> Unit, active: Compare,
+                      otherJob: String?, onOtherJob: (String) -> Unit) {
     var menu by remember { mutableStateOf(false) }
     val survey = thumbs.vm.state.collectAsState().value.settings.survey
+    val options = listOfNotNull(Compare.IMAGE, Compare.SURVEY, Compare.MINE.takeIf { thumbs.nearby.isNotEmpty() }, Compare.BLINK)
     Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Compare.entries.forEach { m ->
+        options.forEach { m ->
             FilterChip(selected = mode == m, onClick = { onMode(m) },
-                label = { Text(m.name.lowercase().replaceFirstChar { it.uppercase() },
+                label = { Text(if (m == Compare.MINE) "Mine" else m.name.lowercase().replaceFirstChar { it.uppercase() },
                     style = MaterialTheme.typography.labelSmall) })
         }
         Spacer(Modifier.weight(1f))
-        Box {
-            TextButton(onClick = { menu = true }, contentPadding = PaddingValues(horizontal = 8.dp)) {
-                Text(thumbs.surveyLabel(survey), style = MaterialTheme.typography.labelSmall, maxLines = 1)
-                Icon(Icons.Default.ArrowDropDown, null, Modifier.size(16.dp))
-            }
-            DropdownMenu(menu, onDismissRequest = { menu = false }) {
-                val list = thumbs.surveys.ifEmpty { listOf(Survey("dss2", "DSS2 colour")) }
-                list.forEach { s ->
-                    DropdownMenuItem(text = { Text(s.label) },
-                        onClick = { thumbs.vm.update { it.copy(survey = s.id) }; menu = false })
+        when (active) {
+            Compare.SURVEY -> Box {
+                TextButton(onClick = { menu = true }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                    Text(thumbs.surveyLabel(survey), style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                    Icon(Icons.Default.ArrowDropDown, null, Modifier.size(16.dp))
+                }
+                DropdownMenu(menu, onDismissRequest = { menu = false }) {
+                    val list = thumbs.surveys.ifEmpty { listOf(Survey("dss2", "DSS2 colour")) }
+                    list.forEach { s ->
+                        DropdownMenuItem(text = { Text(s.label) },
+                            onClick = { thumbs.vm.update { it.copy(survey = s.id) }; menu = false })
+                    }
                 }
             }
+            Compare.MINE -> Box {
+                TextButton(onClick = { menu = true }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                    Text(thumbs.nearbyLabel(otherJob), style = MaterialTheme.typography.labelSmall, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 130.dp))
+                    Icon(Icons.Default.ArrowDropDown, null, Modifier.size(16.dp))
+                }
+                DropdownMenu(menu, onDismissRequest = { menu = false }) {
+                    thumbs.nearby.forEach { n ->
+                        DropdownMenuItem(text = { Text(n.filename.ifBlank { n.jobId.take(8) }) },
+                            onClick = { onOtherJob(n.jobId); menu = false })
+                    }
+                }
+            }
+            else -> {}
         }
     }
 }
@@ -898,6 +980,135 @@ private fun LazyListScope.minorBodyItems(items: List<MinorBody>, haveTime: Boole
             }
         }
     }
+}
+
+private fun LazyListScope.compareItems(job: JobResult, nearby: List<NearbyImage>, vm: AppViewModel) {
+    item(key = "compare") { CompareTab(job, nearby, vm) }
+}
+
+/**
+ * Other exposures of the same field: pick which ones to compare or stack against. "Find
+ * movers" flags candidates that moved between the frames' epochs (candidate asteroids/comets)
+ * and ones that stayed put in every frame but are still in no catalogue (candidate novae).
+ * "Stack" aligns, co-adds and re-analyses the selected frames as one deeper job.
+ */
+@Composable
+private fun CompareTab(job: JobResult, nearby: List<NearbyImage>, vm: AppViewModel) {
+    if (nearby.isEmpty()) {
+        Empty("No other analysed image overlaps this field yet. Analyse a second exposure of " +
+            "the same field and it will show up here.")
+        return
+    }
+    var selected by remember(nearby) { mutableStateOf(nearby.map { it.jobId }.toSet()) }
+    var result by remember { mutableStateOf<CompareResult?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var info by remember { mutableStateOf<String?>(null) }
+    var mover by remember { mutableStateOf<Mover?>(null) }
+    val scope = rememberCoroutineScope()
+
+    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("Other exposures of this field", style = MaterialTheme.typography.titleSmall)
+        nearby.forEach { n ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(n.jobId in selected, { checked -> selected = if (checked) selected + n.jobId else selected - n.jobId })
+                Column(Modifier.weight(1f)) {
+                    Text(n.filename.ifBlank { n.jobId.take(8) }, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        "${f(n.separationArcmin, 1)}′ away" + (n.utcMid.takeIf { it.isNotBlank() }?.let { "  ·  ${it.replace('T', ' ').take(16)}" } ?: ""),
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                enabled = selected.isNotEmpty() && !busy,
+                onClick = {
+                    scope.launch {
+                        busy = true; info = "comparing…"; result = null
+                        runCatching { vm.compare(listOf(job.id) + selected.toList()) }
+                            .onSuccess { r ->
+                                result = r
+                                info = "${r.movers.size} candidate mover(s) · ${r.stationaryUnidentified.size} unmoved unidentified source(s)"
+                            }
+                            .onFailure { e -> info = e.message ?: "comparison failed" }
+                        busy = false
+                    }
+                },
+            ) { Text("Find movers") }
+            OutlinedButton(
+                enabled = selected.isNotEmpty() && !busy,
+                onClick = {
+                    scope.launch {
+                        busy = true; info = "starting the stack…"
+                        runCatching { vm.stack(listOf(job.id) + selected.toList()) }
+                            .onSuccess { up -> vm.watch(up.id) }
+                            .onFailure { e -> info = e.message ?: "could not start the stack" }
+                        busy = false
+                    }
+                },
+            ) { Text("Stack selected") }
+        }
+        info?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        result?.let { r ->
+            if (r.movers.isNotEmpty()) {
+                Text("Candidate movers", fontWeight = FontWeight.SemiBold)
+                r.movers.forEach { m ->
+                    ElevatedCard(Modifier.fillMaxWidth().clickable { mover = m }) {
+                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text("${m.frames.size} frames  ·  ${f(m.rateArcsecH, 1)}″/h  ·  ${f(m.directionDeg, 0)}°  ·  ${m.confidence}",
+                                fontWeight = FontWeight.SemiBold)
+                            m.frames.firstOrNull()?.let {
+                                Text("RA ${f(it.ra, 5)}°  Dec ${f(it.dec, 5)}°", style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+            }
+            if (r.stationaryUnidentified.isNotEmpty()) {
+                Text("Unmoved, still unidentified", fontWeight = FontWeight.SemiBold)
+                r.stationaryUnidentified.forEach { s ->
+                    Text("RA ${f(s.ra, 5)}°  Dec ${f(s.dec, 5)}°  ·  seen in ${s.seenIn.size} frames",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            if (r.movers.isEmpty() && r.stationaryUnidentified.isEmpty()) {
+                Text("Nothing found.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+    mover?.let { m -> MoverBlinkDialog(m, vm) { mover = null } }
+}
+
+/** Cycles through a candidate mover's own close-up in each frame it was seen in: a real mover
+ * jumps from frame to frame while the surrounding star field does not. */
+@Composable
+private fun MoverBlinkDialog(mover: Mover, vm: AppViewModel, onClose: () -> Unit) {
+    var i by remember { mutableIntStateOf(0) }
+    LaunchedEffect(mover) {
+        while (true) { kotlinx.coroutines.delay(900); i = (i + 1) % mover.frames.size }
+    }
+    val fr = mover.frames.getOrNull(i) ?: return
+    AlertDialog(
+        onDismissRequest = onClose,
+        confirmButton = { TextButton(onClick = onClose) { Text("Close") } },
+        title = { Text("Mover blink") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                AsyncImage(
+                    model = vm.api.fileUrl(fr.jobId, "cutout.jpg") + "?x=${fr.x}&y=${fr.y}&size=90&zoom=4",
+                    contentDescription = "candidate mover",
+                    modifier = Modifier.fillMaxWidth().height(220.dp).clip(RoundedCornerShape(8.dp)).background(Color.Black),
+                )
+                Text("Rate ${f(mover.rateArcsecH, 1)} ″/h  ·  direction ${f(mover.directionDeg, 0)}°  ·  ${mover.confidence}",
+                    style = MaterialTheme.typography.bodySmall)
+                Text("Cycling through this candidate's position in each frame. A real moving object jumps " +
+                    "from frame to frame while the background stars stay put.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        },
+    )
 }
 
 private fun LazyListScope.detailItems(job: JobResult) {
